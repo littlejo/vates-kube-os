@@ -129,7 +129,7 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 		if err := waitForEndpoint(cfg.Cluster.ControlPlaneEndpoint, BootstrapTimeout, r); err != nil {
 			return err
 		}
-		if err := joinControlPlane(image, r); err != nil {
+		if err := joinControlPlane(image, nodeName, r); err != nil {
 			return err
 		}
 		return stageJoiningKubeVIP(cfg, nodeIP, r)
@@ -232,7 +232,7 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 // idempotent, so running the join again finds the member already announced, the
 // manifests already written and etcd running, and the promotion succeeds.
 // Bounded, and the last error is reported.
-func joinControlPlane(image string, r Runner) error {
+func joinControlPlane(image, nodeName string, r Runner) error {
 	args := JoinControlPlaneCommand(image)
 	var lastErr error
 	for attempt := 1; attempt <= JoinAttempts; attempt++ {
@@ -240,7 +240,7 @@ func joinControlPlane(image string, r Runner) error {
 		out, err := r.Run(args[0], args[1:]...)
 		if err == nil {
 			r.Logf("kubeadm join (control plane), attempt %d", attempt)
-			return markControlPlane(image, r)
+			return markControlPlane(image, nodeName, r)
 		}
 		lastErr = err
 		r.Logf("kubeadm join attempt %d did not complete: %v", attempt, err)
@@ -252,23 +252,64 @@ func joinControlPlane(image string, r Runner) error {
 	return fmt.Errorf("kubeadm join (control plane) after %d attempts: %w", JoinAttempts, lastErr)
 }
 
-// markControlPlane applies the control-plane label and taint to this node,
-// through kubeadm's own mark-control-plane phase, once the join has completed.
+// MarkAttempts and MarkRetryDelay bound the wait for the node to be registered
+// before the control-plane mark can stick.
 //
-// The join's own copy of that phase is not enough here -- it can give up
-// silently while the node is not yet labelled, and whether it finds the node is
-// this system's timing rather than kubeadm's. See MarkControlPlaneCommand. The
-// phase is idempotent, so running it again after the join costs one API patch
-// and makes the result deterministic: the node exists by now, and a real failure
-// is reported instead of swallowed.
-func markControlPlane(image string, r Runner) error {
-	r.Progress("marking the node as a control plane")
+// kubeadm's phase patches the node through apiclient.PatchNode, which gives up
+// WITHOUT an error when the node does not yet carry the kubernetes.io/hostname
+// label: it polls to its timeout and returns nil. So the phase can exit 0
+// having marked nothing, and the loop below decides success by the LABEL, not
+// the exit code. This is the race the join itself loses (see
+// MarkControlPlaneCommand): this system starts the kubelet before the join, so
+// when the node appears is its own timing.
+const (
+	MarkAttempts   = 12
+	MarkRetryDelay = 15 * time.Second
+)
+
+// markAttempts and markRetryDelay are the values the loop uses; tests shrink the
+// delay so the retry can be asserted without waiting.
+var (
+	markAttempts   = MarkAttempts
+	markRetryDelay = MarkRetryDelay
+)
+
+// markControlPlane applies the control-plane label and taint to this node,
+// through kubeadm's own mark-control-plane phase, and verifies it took.
+//
+// The phase is retried until the node carries node-role.kubernetes.io/control-plane,
+// because the phase itself reports success even when it found no node to mark.
+func markControlPlane(image, nodeName string, r Runner) error {
 	args := MarkControlPlaneCommand(image)
-	if _, err := r.Run(args[0], args[1:]...); err != nil {
-		return fmt.Errorf("kubeadm join phase control-plane-join mark-control-plane: %w", err)
+	var lastErr error
+	for attempt := 1; attempt <= markAttempts; attempt++ {
+		r.Progress("marking the node as a control plane")
+		if _, err := r.Run(args[0], args[1:]...); err != nil {
+			lastErr = err
+			r.Logf("mark-control-plane attempt %d did not complete: %v", attempt, err)
+		}
+		if hasControlPlaneLabel(nodeName, r) {
+			r.Logf("node marked as a control plane")
+			return nil
+		}
+		if attempt < markAttempts {
+			time.Sleep(markRetryDelay)
+		}
 	}
-	r.Logf("kubeadm join phase control-plane-join mark-control-plane")
-	return nil
+	if lastErr != nil {
+		return fmt.Errorf("kubeadm join phase control-plane-join mark-control-plane: %w", lastErr)
+	}
+	return fmt.Errorf("node %s was not marked as a control plane after %d attempts", nodeName, markAttempts)
+}
+
+// hasControlPlaneLabel reports whether the node carries the control-plane role
+// label. The label's VALUE is empty, so its presence is what is checked: a
+// jsonpath on the value cannot tell "" from absent.
+func hasControlPlaneLabel(nodeName string, r Runner) bool {
+	args := kubectlArgs(KubeletImageRef, "--kubeconfig="+AdminKubeconfig,
+		"get", "node", nodeName, "-o", "jsonpath={.metadata.labels}")
+	out, err := r.Run(args[0], args[1:]...)
+	return err == nil && strings.Contains(string(out), "node-role.kubernetes.io/control-plane")
 }
 
 // stageJoiningKubeVIP installs the kube-vip static pod on a control plane that

@@ -818,6 +818,51 @@ func (f *fakeRunner) Run(name string, args ...string) ([]byte, error) {
 func (f *fakeRunner) Logf(format string, args ...any) {}
 func (f *fakeRunner) Progress(string)                 {}
 
+// markRunner answers the two commands markControlPlane issues: the mark phase
+// (recorded) and the kubectl label check (empty until labelsAfter).
+type markRunner struct {
+	checks      int
+	labelsAfter int
+	marks       int
+}
+
+func (m *markRunner) MkdirAll(string, os.FileMode) error          { return nil }
+func (m *markRunner) WriteFile(string, os.FileMode, []byte) error { return nil }
+func (m *markRunner) Stat(string) (os.FileInfo, error)            { return nil, os.ErrNotExist }
+func (m *markRunner) Logf(string, ...any)                         {}
+func (m *markRunner) Progress(string)                             {}
+func (m *markRunner) Run(name string, args ...string) ([]byte, error) {
+	joined := strings.Join(append([]string{name}, args...), " ")
+	switch {
+	case strings.Contains(joined, "jsonpath={.metadata.labels}"):
+		m.checks++
+		if m.checks >= m.labelsAfter {
+			return []byte(`{"node-role.kubernetes.io/control-plane":""}`), nil
+		}
+		return []byte(`{}`), nil
+	case strings.Contains(joined, "mark-control-plane"):
+		m.marks++
+	}
+	return nil, nil
+}
+
+func TestMarkControlPlaneRetriesUntilTheLabelSticks(t *testing.T) {
+	// kubeadm's mark-control-plane phase returns success even when it found no
+	// node to mark, so success is decided by the label. The loop must retry
+	// until the label appears, not trust the exit code.
+	old := markRetryDelay
+	markRetryDelay = time.Millisecond
+	defer func() { markRetryDelay = old }()
+
+	r := &markRunner{labelsAfter: 3}
+	if err := markControlPlane(KubeletImageRef, "vates-cp-1", r); err != nil {
+		t.Fatalf("markControlPlane() error = %v", err)
+	}
+	if r.marks < 3 {
+		t.Errorf("the mark phase ran %d time(s), want it retried until the label stuck", r.marks)
+	}
+}
+
 func TestApplyOrdersFilesBeforeStartingTheNode(t *testing.T) {
 	paths := testPaths(t)
 	r := &fakeRunner{}
