@@ -184,12 +184,19 @@ func readConfig(drive *configdrive.Drive) (*vatescfg.Config, string, string, err
 	if err != nil {
 		return nil, "", "", fmt.Errorf("reading the node configuration from %s: %w", source, err)
 	}
-	// The node name comes from the drive's meta-data rather than from the
-	// configuration document, so the provider has one place to put the name and
-	// the name is where NoCloud already puts it.
-	nodeName, err := drive.NodeName()
-	if err != nil {
-		return nil, "", "", err
+	// The node name is stated by the bootstrap provider in the document when it
+	// knows it -- under CAPI, that is the Machine's name, and it is the only
+	// source on a hypervisor that writes instance-id but no local-hostname
+	// (Xen Orchestra). When the document states no name, the drive's meta-data
+	// local-hostname is used, which is where NoCloud puts it and what a
+	// hand-built drive carries.
+	nodeName := cfg.Node.Name
+	if nodeName == "" {
+		var nameErr error
+		nodeName, nameErr = drive.NodeName()
+		if nameErr != nil {
+			return nil, "", "", nameErr
+		}
 	}
 	return cfg, nodeName, source, nil
 }

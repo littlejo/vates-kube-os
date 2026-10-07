@@ -29,13 +29,13 @@ type Metadata struct {
 	LocalHostname string `yaml:"local-hostname"`
 }
 
-// NodeName returns the name this machine should be known by in Kubernetes.
+// NodeName returns the name this machine should be known by in Kubernetes when
+// the configuration document states none.
 //
-// It comes from the drive's local-hostname rather than from vates-node.yaml: the
-// whole contract with the CAPI provider is the vates-node.yaml document, and adding
-// a second place to state the machine's identity would mean two values that can
-// disagree. NoCloud's local-hostname is the machine's hostname, which is
-// exactly what the node name is.
+// The document's node.name is the first source, and the one a CAPI bootstrap
+// provider fills from the Machine's name; this meta-data path is the fallback a
+// hand-built drive uses. NoCloud's local-hostname is the machine's hostname,
+// which is exactly what the node name is.
 func (d *Drive) NodeName() (string, error) {
 	raw, err := d.File("meta-data")
 	if err != nil {

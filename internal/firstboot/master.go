@@ -101,8 +101,9 @@ func MasterFiles(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, no
 		// The cluster CA is required on the drive, whether or not the drive also
 		// carries the whole PKI: the kubelet verifies the API server with it
 		// while it bootstraps, before kubeadm has fetched anything.
-		if !drive.Has(pkiCACert) {
-			return nil, fmt.Errorf("a joining control plane requires the cluster CA certificate (%s) on the config drive", pkiCACert)
+		if cfg.PKI.ClusterCA.Cert == "" && !drive.Has(pkiCACert) {
+			return nil, fmt.Errorf("a joining control plane requires the cluster CA certificate " +
+				"(pki.clusterCA.cert in vates-node.yaml, or pki/ca.crt on the config drive)")
 		}
 		if !drive.Has(pkiCAKey) && cfg.Cluster.CertificateKey == "" {
 			return nil, fmt.Errorf("a joining control plane needs either the cluster's PKI " +
@@ -121,7 +122,7 @@ func MasterFiles(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, no
 			}
 			files = append(files, pki...)
 		} else {
-			content, err := drive.File(pkiCACert)
+			content, err := clusterCACert(cfg, drive)
 			if err != nil {
 				return nil, err
 			}
@@ -149,6 +150,26 @@ func MasterFiles(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, no
 			Content: joinCfg,
 		})
 	} else {
+		// A bootstrapping control plane normally generates the cluster CA. When
+		// the provider states one in the document, the node REUSES it instead:
+		// writing the files before kubeadm runs makes kubeadm keep them, so
+		// every control plane shares one authority from the first machine -- the
+		// model a CAPI control plane provider owns (it holds the CA, no node
+		// does).
+		if cfg.PKI.ClusterCA.Cert != "" {
+			files = append(files, File{
+				Path:    filepath.Join(paths.Kubernetes, "pki", "ca.crt"),
+				Mode:    0o644,
+				Content: ensureNewline(cfg.PKI.ClusterCA.Cert),
+			})
+			if cfg.PKI.ClusterCA.Key != "" {
+				files = append(files, File{
+					Path:    filepath.Join(paths.Kubernetes, "pki", "ca.key"),
+					Mode:    0o600,
+					Content: ensureNewline(cfg.PKI.ClusterCA.Key),
+				})
+			}
+		}
 		kubeadmCfg, err := KubeadmConfig(cfg, nodeName, nodeIP)
 		if err != nil {
 			return nil, err

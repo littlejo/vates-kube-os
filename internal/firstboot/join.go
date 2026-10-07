@@ -224,3 +224,40 @@ func JoinControlPlaneCommand(image string) []string {
 		"--ignore-preflight-errors=FileAvailable--etc-kubernetes-kubelet.conf,FileAvailable--etc-kubernetes-bootstrap-kubelet.conf,Port-10250,FileExisting-conntrack,FileExisting-nsenter",
 	)
 }
+
+// MarkControlPlaneCommand is the command that applies the control-plane role to
+// this node, through kubeadm's own phase.
+//
+// It runs AFTER a successful join, and it exists because the mark the join
+// performs is not dependable HERE. `kubeadm join --control-plane` does contain a
+// `control-plane-join/mark-control-plane` subphase, but that subphase patches
+// the node through kubeadm's apiclient.PatchNode, which gives up WITHOUT an
+// error when the node does not yet carry the `kubernetes.io/hostname` label: it
+// polls until its API-call timeout and then returns a nil error, so the join
+// reports success with an unmarked node. Measured against kubeadm v1.31.0: a
+// node created without that label is left untouched and kubeadm exits 0, having
+// printed "[mark-control-plane] Marking the node ...".
+//
+// That matters here because this system starts the kubelet ITSELF, before the
+// join, and skips kubeadm's kubelet-start -- so when the node is registered, and
+// therefore whether the join's subphase finds it, is this system's timing and
+// not kubeadm's. On the node that creates the cluster the same phase is run
+// explicitly for the same reason (see BootstrapPhases); a joining control plane
+// must not depend on winning a race the first one does not.
+//
+// The phase is the JOIN one, not the init one: the document on disk is a
+// JoinConfiguration, and the join phase reads exactly it. It is idempotent, so
+// re-applying what the join already applied costs nothing.
+func MarkControlPlaneCommand(image string) []string {
+	// The binary cache and the version travel with the command, exactly as they
+	// do for the join: the image is generic and the kubeadm it runs is fetched
+	// at run time.
+	args := kubeadmContainers()
+	args = append(args, binarySourceArgs()...)
+	return append(args,
+		image,
+		ctrContainerID("kubeadm-mark-control-plane"),
+		"/usr/local/bin/kubeadm", "join", "phase", "control-plane-join", "mark-control-plane",
+		"--config", JoinConfigPath,
+	)
+}

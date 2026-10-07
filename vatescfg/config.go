@@ -26,6 +26,46 @@ const (
 	RoleWorker Role = "worker"
 )
 
+// Node is the machine's identity.
+//
+// The name is normally left out of the document: a NoCloud config drive carries
+// it in its meta-data `local-hostname`, and the node falls back to that when
+// no name is set here. But an infrastructure provider that does not write a
+// usable `local-hostname` -- Xen Orchestra writes `instance-id` only -- can
+// state the name here instead, where the bootstrap provider, which knows the
+// CAPI Machine's name, can put it. At least one of the two must be present.
+type Node struct {
+	// Name is the Kubernetes node name. Optional; when set it wins over the
+	// config drive's meta-data `local-hostname`.
+	Name string `yaml:"name,omitempty"`
+}
+
+// PKI is the certificate material the provider hands the node, when it hands
+// any. It is absent on the direct-drive path, where the drive carries the
+// material as files; on the CAPI path the document is the only channel, so the
+// provider states the PEMs here and the node writes them where kubeadm and the
+// management API expect them.
+type PKI struct {
+	// ClusterCA is the cluster's certificate authority. Its certificate is
+	// enough for a joining machine -- a worker, or a control plane that fetches
+	// the shared certificates with a certificate key; the key is only needed by
+	// a node that must sign with it.
+	ClusterCA CertificateAuthority `yaml:"clusterCA,omitempty"`
+	// APICA is the operator's certificate authority for the management API. A
+	// bootstrapping control plane mints its :50000 server certificate from it
+	// and trusts the clients it signs, which is how a provider authenticates
+	// without holding the cluster CA.
+	APICA CertificateAuthority `yaml:"apiCA,omitempty"`
+}
+
+// CertificateAuthority is a PEM certificate, and optionally its private key.
+type CertificateAuthority struct {
+	// Cert is the PEM certificate. Required when the block is present.
+	Cert string `yaml:"cert,omitempty"`
+	// Key is the PEM private key, present only when the holder must sign.
+	Key string `yaml:"key,omitempty"`
+}
+
 // Config is the whole of vates-node.yaml.
 //
 // Every field is required unless its doc comment says otherwise. Unknown keys
@@ -34,6 +74,8 @@ const (
 // project keeps running into.
 type Config struct {
 	Role       Role       `yaml:"role"`
+	Node       Node       `yaml:"node,omitempty"`
+	PKI        PKI        `yaml:"pki,omitempty"`
 	Kubernetes Kubernetes `yaml:"kubernetes"`
 	Cluster    Cluster    `yaml:"cluster"`
 	Network    Network    `yaml:"network"`
@@ -372,9 +414,10 @@ const (
 )
 
 var (
-	versionRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
-	tokenRe   = regexp.MustCompile(`^[a-z0-9]{6}\.[a-z0-9]{16}$`)
-	caHashRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	versionRe  = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
+	tokenRe    = regexp.MustCompile(`^[a-z0-9]{6}\.[a-z0-9]{16}$`)
+	caHashRe   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	nodeNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 )
 
 // VIPInterface is the interface kube-vip should announce on: the explicit
@@ -565,6 +608,39 @@ func (c *Config) Validate() error {
 
 	if c.API.Port != 0 && (c.API.Port < 1 || c.API.Port > 65535) {
 		return fmt.Errorf("api.port %d is not a TCP port (1-65535)", c.API.Port)
+	}
+
+	// The name here is the node identity the bootstrap provider states, and it
+	// wins over the drive's meta-data. Refusing a bad one at the parse means the
+	// failure names node.name, not a rejected node registration later.
+	if c.Node.Name != "" {
+		if net.ParseIP(c.Node.Name) != nil {
+			return fmt.Errorf("node.name %q is an IP address; the node name must be stable while the address may change", c.Node.Name)
+		}
+		if !nodeNameRe.MatchString(c.Node.Name) {
+			return fmt.Errorf("node.name %q is not usable as a Kubernetes node name (lowercase RFC 1123 subdomain)", c.Node.Name)
+		}
+	}
+
+	// The PKI block is optional. A half-populated one is refused rather than
+	// written to /etc/kubernetes: a key with no certificate, or a blob that is
+	// not PEM, would surface on the node as an opaque x509 error.
+	for _, ca := range []struct {
+		name  string
+		value CertificateAuthority
+	}{
+		{"pki.clusterCA", c.PKI.ClusterCA},
+		{"pki.apiCA", c.PKI.APICA},
+	} {
+		if ca.value.Key != "" && ca.value.Cert == "" {
+			return fmt.Errorf("%s.key is set without %s.cert", ca.name, ca.name)
+		}
+		if ca.value.Cert != "" && !strings.Contains(ca.value.Cert, "-----BEGIN CERTIFICATE-----") {
+			return fmt.Errorf("%s.cert is not a PEM certificate", ca.name)
+		}
+		if ca.value.Key != "" && !strings.Contains(ca.value.Key, "PRIVATE KEY-----") {
+			return fmt.Errorf("%s.key is not a PEM private key", ca.name)
+		}
 	}
 
 	// The VIP is a control plane concern. Accepting it on a worker would let a

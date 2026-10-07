@@ -211,6 +211,101 @@ func TestFilesGivesAWorkerTheCABootstrapAndToken(t *testing.T) {
 	}
 }
 
+func TestMasterFilesReusesAnInjectedClusterCA(t *testing.T) {
+	// The CAPI control plane provider owns the CA and states it in the document.
+	// A bootstrapping control plane must reuse it (write the files so kubeadm
+	// keeps them) instead of generating its own.
+	paths := testPaths(t)
+	doc := masterDoc + `pki:
+  clusterCA:
+    cert: |
+      -----BEGIN CERTIFICATE-----
+      CA
+      -----END CERTIFICATE-----
+    key: |
+      -----BEGIN PRIVATE KEY-----
+      KEY
+      -----END PRIVATE KEY-----
+`
+	files, err := Files(loadConfig(t, doc), bareDrive(t, doc), paths, "vates-cp-1", "10.0.2.15")
+	if err != nil {
+		t.Fatalf("Files() failed: %v", err)
+	}
+
+	ca, ok := findFile(files, filepath.Join(paths.Kubernetes, "pki", "ca.crt"))
+	if !ok {
+		t.Fatal("Files() did not write the injected cluster CA")
+	}
+	if !strings.Contains(string(ca.Content), "CA") {
+		t.Errorf("cluster CA is not the injected one:\n%s", ca.Content)
+	}
+	key, ok := findFile(files, filepath.Join(paths.Kubernetes, "pki", "ca.key"))
+	if !ok {
+		t.Fatal("Files() did not write the injected cluster CA key")
+	}
+	if key.Mode != 0o600 {
+		t.Errorf("ca.key mode = %#o, want 0600", key.Mode)
+	}
+
+	// The node still runs kubeadm init, so it is not treated as a joiner.
+	if _, ok := findFile(files, JoinConfigPath); ok {
+		t.Error("an injected-CA bootstrapping control plane must run kubeadm init, not a join")
+	}
+}
+
+func TestFilesTakesThePKIFromTheDocument(t *testing.T) {
+	paths := testPaths(t)
+
+	// The CAPI path: the provider states the PKI in the document, because the
+	// hypervisor gives no channel for a file. The cluster CA must land where the
+	// kubelet expects it, and the operator CA where the management API expects it.
+	doc := workerDoc + `pki:
+  clusterCA:
+    cert: |
+      -----BEGIN CERTIFICATE-----
+      CLUSTER-CA
+      -----END CERTIFICATE-----
+  apiCA:
+    cert: |
+      -----BEGIN CERTIFICATE-----
+      API-CA
+      -----END CERTIFICATE-----
+    key: |
+      -----BEGIN PRIVATE KEY-----
+      API-CA-KEY
+      -----END PRIVATE KEY-----
+`
+
+	// A drive with no PKI files at all: everything must come from the document.
+	files, err := Files(loadConfig(t, doc), bareDrive(t, doc), paths, "vates-worker-1", "10.0.2.15")
+	if err != nil {
+		t.Fatalf("Files() failed: %v", err)
+	}
+
+	ca, ok := findFile(files, filepath.Join(paths.Kubernetes, "pki", "ca.crt"))
+	if !ok {
+		t.Fatal("Files() did not install the cluster CA from the document")
+	}
+	if !strings.Contains(string(ca.Content), "CLUSTER-CA") {
+		t.Errorf("cluster CA is not the document's:\n%s", ca.Content)
+	}
+
+	apiCA, ok := findFile(files, OperatorCAPath)
+	if !ok {
+		t.Fatal("Files() did not install the operator CA certificate from the document")
+	}
+	if !strings.Contains(string(apiCA.Content), "API-CA") {
+		t.Errorf("operator CA is not the document's:\n%s", apiCA.Content)
+	}
+	apiKey, ok := findFile(files, OperatorCAKeyPath)
+	if !ok {
+		t.Fatal("Files() did not install the operator CA key from the document")
+	}
+	if apiKey.Mode != 0o600 {
+		t.Errorf("%s mode = %#o, want 0600", OperatorCAKeyPath, apiKey.Mode)
+	}
+}
+
 func TestFilesWritesKubeletConfigForContainerdAndCgroupfs(t *testing.T) {
 	paths := testPaths(t)
 	files, err := Files(loadConfig(t, workerDoc), workerDrive(t), paths, "vates-worker-1", "10.0.2.15")

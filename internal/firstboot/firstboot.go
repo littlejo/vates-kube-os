@@ -370,7 +370,7 @@ func Files(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName
 	if err != nil {
 		return nil, err
 	}
-	files = append(files, apiCAFiles(drive)...)
+	files = append(files, apiCAFiles(cfg, drive)...)
 	files = append(files, apiHostsFile(cfg), hostnameFile(nodeName), apiPortDropIn(cfg))
 	return files, nil
 }
@@ -458,16 +458,23 @@ func apiHostsFile(cfg *vatescfg.Config) File {
 // mints its server certificate from it, so one authority covers both directions
 // of mutual TLS: the operator verifies the node, the node verifies the operator.
 // The files are simply absent when no such CA was provided (the CAPI case).
-func apiCAFiles(drive *configdrive.Drive) []File {
+func apiCAFiles(cfg *vatescfg.Config, drive *configdrive.Drive) []File {
 	var files []File
 	for _, f := range []struct {
 		onDrive string
 		path    string
 		mode    os.FileMode
+		fromDoc string
 	}{
-		{"api-ca.crt", OperatorCAPath, 0o644},
-		{"api-ca.key", OperatorCAKeyPath, 0o600},
+		{"api-ca.crt", OperatorCAPath, 0o644, cfg.PKI.APICA.Cert},
+		{"api-ca.key", OperatorCAKeyPath, 0o600, cfg.PKI.APICA.Key},
 	} {
+		// The document wins when it carries the material: on the CAPI path it is
+		// the only channel. The drive files are the direct-drive path.
+		if f.fromDoc != "" {
+			files = append(files, File{Path: f.path, Mode: f.mode, Content: ensureNewline(f.fromDoc)})
+			continue
+		}
 		if !drive.Has(f.onDrive) {
 			continue
 		}
@@ -478,6 +485,27 @@ func apiCAFiles(drive *configdrive.Drive) []File {
 		files = append(files, File{Path: f.path, Mode: f.mode, Content: content})
 	}
 	return files
+}
+
+// ensureNewline gives a PEM from the document a trailing newline, which a YAML
+// block scalar usually keeps but a hand-written string may not. A PEM without
+// one is parsed by some tools and not others; normalising here removes the
+// difference.
+func ensureNewline(s string) []byte {
+	if strings.HasSuffix(s, "\n") {
+		return []byte(s)
+	}
+	return []byte(s + "\n")
+}
+
+// clusterCACert is the cluster CA certificate, from the document when the
+// provider stated it (the CAPI path), otherwise from the config drive (the
+// direct-drive path).
+func clusterCACert(cfg *vatescfg.Config, drive *configdrive.Drive) ([]byte, error) {
+	if cfg.PKI.ClusterCA.Cert != "" {
+		return ensureNewline(cfg.PKI.ClusterCA.Cert), nil
+	}
+	return drive.File(pkiCACert)
 }
 
 // kubeletConfFile is the file name Kubernetes gives to both the kubelet's
@@ -558,9 +586,9 @@ func kubeletConfigFile(cfg *vatescfg.Config, paths Paths) (File, error) {
 func workerFiles(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName, nodeIP string) ([]File, error) {
 	var files []File
 
-	ca, err := drive.File(pkiCACert)
+	ca, err := clusterCACert(cfg, drive)
 	if err != nil {
-		return nil, fmt.Errorf("worker node requires %s on the config drive: %w", pkiCACert, err)
+		return nil, fmt.Errorf("worker node requires the cluster CA certificate (pki.clusterCA.cert in vates-node.yaml, or %s on the config drive): %w", pkiCACert, err)
 	}
 	files = append(files, File{
 		Path:    filepath.Join(paths.Kubernetes, "pki", "ca.crt"),

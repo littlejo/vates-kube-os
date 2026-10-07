@@ -43,11 +43,13 @@ var BootstrapPhases = []string{
 	// column of `kubectl get nodes` reads and what keeps ordinary workloads off
 	// it.
 	//
-	// A JOINING control plane gets both from `kubeadm join`, so leaving this out
-	// produces a cluster whose first control plane differs from the other two:
-	// it shows no role, and pods are placed on it. Measured, not inferred: with
+	// A JOINING control plane gets both from `kubeadm join`, which runs the same
+	// phase -- but only from a mark this system does not leave to the join alone
+	// (see MarkControlPlaneCommand and markControlPlane). Leaving this out
+	// produces a cluster whose first control plane differs from the others: it
+	// shows no role, and pods are placed on it. Measured, not inferred: with
 	// this phase absent, `kubectl get nodes` printed vates-cp-1 with an empty
-	// ROLES column beside vates-cp-2 and vates-cp-3 marked control-plane.
+	// ROLES column beside the joining control planes marked control-plane.
 	//
 	// It has to run here rather than with the earlier phases: it writes to the
 	// API, which only answers once the kubelet has started the static pods.
@@ -127,36 +129,10 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 		if err := waitForEndpoint(cfg.Cluster.ControlPlaneEndpoint, BootstrapTimeout, r); err != nil {
 			return err
 		}
-		// Retried, because the join contains a race that is Kubernetes' own and
-		// not a defect of this system: its etcd phase announces this machine as
-		// a LEARNER, writes the etcd manifest -- which the kubelet then turns
-		// into a running etcd -- and promotes the learner IMMEDIATELY, without
-		// waiting for it to have started. A promotion of a learner that is not
-		// yet in sync fails with
-		//   can only promote a learner member which is in sync with leader
-		// even though etcd comes up a second later.
-		//
-		// Everything before that point is idempotent, so running the join again
-		// finds the member already announced, the manifests already written and
-		// etcd running, and the promotion succeeds. Bounded, and the last error
-		// is reported.
-		args := JoinControlPlaneCommand(image)
-		var lastErr error
-		for attempt := 1; attempt <= JoinAttempts; attempt++ {
-			r.Progress(fmt.Sprintf("joining the cluster (attempt %d of %d)", attempt, JoinAttempts))
-			out, err := r.Run(args[0], args[1:]...)
-			if err == nil {
-				r.Logf("kubeadm join (control plane), attempt %d", attempt)
-				return stageJoiningKubeVIP(cfg, nodeIP, r)
-			}
-			lastErr = err
-			r.Logf("kubeadm join attempt %d did not complete: %v", attempt, err)
-			_ = out
-			if attempt < JoinAttempts {
-				time.Sleep(JoinRetryDelay)
-			}
+		if err := joinControlPlane(image, r); err != nil {
+			return err
 		}
-		return fmt.Errorf("kubeadm join (control plane) after %d attempts: %w", JoinAttempts, lastErr)
+		return stageJoiningKubeVIP(cfg, nodeIP, r)
 	}
 
 	r.Progress("waiting for the API server")
@@ -235,6 +211,63 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 		r.Logf("applied the cloud manifest %s", m)
 	}
 
+	return nil
+}
+
+// joinControlPlane runs `kubeadm join` for this control plane and then applies
+// the control-plane mark through kubeadm's own phase.
+//
+// Split from Bootstrap so the sequence -- join, retried, then mark-control-plane
+// -- can be asserted without a network or a cluster.
+//
+// The join is retried, because it contains a race that is Kubernetes' own and
+// not a defect of this system: its etcd phase announces this machine as a
+// LEARNER, writes the etcd manifest -- which the kubelet then turns into a
+// running etcd -- and promotes the learner IMMEDIATELY, without waiting for it
+// to have started. A promotion of a learner that is not yet in sync fails with
+//
+//	can only promote a learner member which is in sync with leader
+//
+// even though etcd comes up a second later. Everything before that point is
+// idempotent, so running the join again finds the member already announced, the
+// manifests already written and etcd running, and the promotion succeeds.
+// Bounded, and the last error is reported.
+func joinControlPlane(image string, r Runner) error {
+	args := JoinControlPlaneCommand(image)
+	var lastErr error
+	for attempt := 1; attempt <= JoinAttempts; attempt++ {
+		r.Progress(fmt.Sprintf("joining the cluster (attempt %d of %d)", attempt, JoinAttempts))
+		out, err := r.Run(args[0], args[1:]...)
+		if err == nil {
+			r.Logf("kubeadm join (control plane), attempt %d", attempt)
+			return markControlPlane(image, r)
+		}
+		lastErr = err
+		r.Logf("kubeadm join attempt %d did not complete: %v", attempt, err)
+		_ = out
+		if attempt < JoinAttempts {
+			time.Sleep(JoinRetryDelay)
+		}
+	}
+	return fmt.Errorf("kubeadm join (control plane) after %d attempts: %w", JoinAttempts, lastErr)
+}
+
+// markControlPlane applies the control-plane label and taint to this node,
+// through kubeadm's own mark-control-plane phase, once the join has completed.
+//
+// The join's own copy of that phase is not enough here -- it can give up
+// silently while the node is not yet labelled, and whether it finds the node is
+// this system's timing rather than kubeadm's. See MarkControlPlaneCommand. The
+// phase is idempotent, so running it again after the join costs one API patch
+// and makes the result deterministic: the node exists by now, and a real failure
+// is reported instead of swallowed.
+func markControlPlane(image string, r Runner) error {
+	r.Progress("marking the node as a control plane")
+	args := MarkControlPlaneCommand(image)
+	if _, err := r.Run(args[0], args[1:]...); err != nil {
+		return fmt.Errorf("kubeadm join phase control-plane-join mark-control-plane: %w", err)
+	}
+	r.Logf("kubeadm join phase control-plane-join mark-control-plane")
 	return nil
 }
 

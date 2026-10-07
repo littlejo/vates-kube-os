@@ -53,6 +53,39 @@ func TestLoadAcceptsValidDocuments(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsDocumentPKI(t *testing.T) {
+	// The CAPI path states the PKI in the document, since the hypervisor gives
+	// no other channel. The schema accepts it and the node writes it.
+	doc := strings.Replace(baseWorker, "role: worker\n", `role: worker
+pki:
+  clusterCA:
+    cert: |
+      -----BEGIN CERTIFICATE-----
+      MIIB
+      -----END CERTIFICATE-----
+  apiCA:
+    cert: |
+      -----BEGIN CERTIFICATE-----
+      MIIB
+      -----END CERTIFICATE-----
+    key: |
+      -----BEGIN PRIVATE KEY-----
+      MIIB
+      -----END PRIVATE KEY-----
+`, 1)
+
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load() rejected a document with a PKI block: %v", err)
+	}
+	if strings.TrimSpace(c.PKI.ClusterCA.Cert) == "" {
+		t.Error("pki.clusterCA.cert was not decoded")
+	}
+	if c.PKI.APICA.Key == "" {
+		t.Error("pki.apiCA.key was not decoded")
+	}
+}
+
 func TestLoadAcceptsNoneCNIAndProxyDisabled(t *testing.T) {
 	// The pair a CNI that replaces kube-proxy (Cilium) needs: no CNI installed by
 	// the node, and no kube-proxy either.
@@ -94,6 +127,26 @@ func TestLoadRejects(t *testing.T) {
 			name:    "bad role",
 			doc:     strings.Replace(baseWorker, "role: worker", "role: controlplane", 1),
 			wantSub: "not one of master, worker",
+		},
+		{
+			name:    "node name is an IP",
+			doc:     strings.Replace(baseWorker, "role: worker\n", "role: worker\nnode:\n  name: 10.0.2.15\n", 1),
+			wantSub: "node.name",
+		},
+		{
+			name:    "node name is not RFC 1123",
+			doc:     strings.Replace(baseWorker, "role: worker\n", "role: worker\nnode:\n  name: Bad_Name\n", 1),
+			wantSub: "node.name",
+		},
+		{
+			name:    "pki key without cert",
+			doc:     strings.Replace(baseWorker, "role: worker\n", "role: worker\npki:\n  clusterCA:\n    key: |\n      -----BEGIN PRIVATE KEY-----\n", 1),
+			wantSub: "pki.clusterCA.key is set without pki.clusterCA.cert",
+		},
+		{
+			name:    "pki cert is not PEM",
+			doc:     strings.Replace(baseWorker, "role: worker\n", "role: worker\npki:\n  clusterCA:\n    cert: not-a-cert\n", 1),
+			wantSub: "pki.clusterCA.cert is not a PEM certificate",
 		},
 		{
 			name:    "missing version",

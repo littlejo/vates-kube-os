@@ -65,8 +65,10 @@ import "github.com/vatesfr/vates-kube-os/vatescfg"
 userData, err := cfg.UserData()   // the bytes to put in the bootstrap Secret
 ```
 
-The **node name** does not go in the document: it comes from the config drive's
-`meta-data` (`local-hostname`), which NoCloud already defines.
+The **node name** is stated by the bootstrap provider in the document
+(`node.name`), because it is the one that knows the CAPI `Machine` name. A
+hypervisor's `meta-data` (`local-hostname`) is the fallback, for a hand-built
+drive that states no name; a node needs one of the two.
 
 ## What the provider does at reconcile time
 
