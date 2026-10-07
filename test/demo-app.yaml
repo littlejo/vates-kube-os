@@ -1,0 +1,64 @@
+# A namespace and a small application, to show the cluster actually serving
+# something at the level people use it: a Deployment, a Service, DNS, and the
+# pod network.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    app.kubernetes.io/part-of: vates-gentest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+  namespace: demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello
+  template:
+    metadata:
+      labels:
+        app: hello
+    spec:
+      # The smallest sensible request: this is a test, not a workload, but a
+      # pod with no requests at all is scheduled differently from one with them
+      # and teaches nothing about a real node.
+      containers:
+        - name: hello
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - -text=bonjour depuis Vates Kube OS
+            - -listen=:5678
+          ports:
+            - name: http
+              containerPort: 5678
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+  namespace: demo
+spec:
+  type: ClusterIP
+  selector:
+    app: hello
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

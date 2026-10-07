@@ -1,0 +1,1128 @@
+package sysinit
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/vatesfr/vates-kube-os/internal/console/tty"
+	"github.com/vatesfr/vates-kube-os/internal/dashboard"
+	"github.com/vatesfr/vates-kube-os/internal/firstboot"
+	"github.com/vatesfr/vates-kube-os/internal/update/ab"
+)
+
+// pid1Mount is one entry of the pseudo-filesystem table.
+type pid1Mount struct {
+	source string
+	target string
+	fstype string
+	flags  uintptr
+	data   string
+}
+
+// pid1Mounts is what has to be mounted before containerd, the kubelet and the
+// console can work. Order matters: /dev before /dev/pts and /dev/shm, /sys
+// before /sys/fs/cgroup and /sys/fs/bpf.
+var pid1Mounts = []pid1Mount{
+	{"proc", "/proc", "proc", 0, ""},
+	{"sysfs", "/sys", "sysfs", 0, ""},
+	// bpffs, for Cilium. Its agent pins its BPF maps and programs under
+	// /sys/fs/bpf, and it expects the filesystem to be there: without it the
+	// agent's first pin fails. A distribution mounts it at boot (systemd does);
+	// with `vates` as PID 1, PID 1 does.
+	{"bpf", "/sys/fs/bpf", "bpf", 0, "mode=0700"},
+	{"devtmpfs", "/dev", "devtmpfs", syscall.MS_NOSUID, "mode=0755"},
+	{"devpts", "/dev/pts", "devpts", 0, "mode=0620,ptmxmode=0666"},
+	{"tmpfs", "/dev/shm", "tmpfs", syscall.MS_NOSUID | syscall.MS_NODEV, "mode=1777"},
+	{"tmpfs", "/run", "tmpfs", syscall.MS_NOSUID | syscall.MS_NODEV, "mode=0755"},
+	{"tmpfs", "/tmp", "tmpfs", syscall.MS_NOSUID | syscall.MS_NODEV, "mode=1777"},
+}
+
+const (
+	pid1Containerd     = "/usr/bin/containerd"
+	pid1ContainerdConf = "/etc/containerd/config.toml"
+	// Where containerd listens. PID 1 uses ctr (the kubelet image import, and
+	// configure's kubeadm phases) and ctr fails outright until this exists.
+	pid1ContainerdSocket = "/run/containerd/containerd.sock"
+	// vates-console, not vates-dashboard: it picks the graphical face when there
+	// is a DRM card and falls back to the text one otherwise. One image, both.
+	pid1Console = "/usr/local/bin/vates-console"
+	// The kubelet container runner, started as a child instead of by systemd.
+	pid1KubeletRun = "/usr/local/bin/vates-kubelet-run"
+	// The management API (mTLS gRPC), the thing that replaces SSH: a child of
+	// PID 1.
+	pid1API = "/usr/local/bin/vates-api"
+	// The Xen guest agent (the Containerfile's xe stage). xe-linux-distribution
+	// writes the OS cache xe-daemon reads; xe-daemon publishes the guest's view
+	// of itself to XenStore for Xen Orchestra. Not needed for providerID -- the
+	// CCM maps a node by SystemUUID -- but it is what makes the VM's IP, its OS
+	// and a clean shutdown visible to the hypervisor.
+	pid1XeDaemon     = "/usr/sbin/xe-daemon"
+	pid1XeDistroInfo = "/usr/sbin/xe-linux-distribution"
+	// The OS cache xe-daemon's CollectOS reads, written by pid1XeDistroInfo.
+	pid1XeOSCache = "/var/cache/xe-linux-distribution"
+	// The kubelet image, shipped as a docker-archive and imported on first boot.
+	// It is the launcher that fetches the Kubernetes binaries for the version
+	// vates-node.yaml asks for, so it is identical on every node and in the
+	// image; only the archive travels.
+	//
+	// On the ROOT filesystem, not under /var: /var is a partition of its own,
+	// mounted over the root's /var early in boot, so anything shipped at
+	// /var/... in the image would be hidden. The archive is read, not kept, so
+	// the root filesystem is where it belongs.
+	pid1KubeletTar = "/usr/share/vates/kubelet.tar"
+	// The boot splash: the wordmark and the bring-up steps, drawn on the screen
+	// before the console takes it over. It is Plymouth replaced by this binary,
+	// nothing more.
+	pid1Splash = "/usr/local/bin/vates-splash"
+)
+
+// importKubeletImage loads the kubelet image into containerd's `vates`
+// namespace, the one the runner uses, unless it is already there.
+//
+// The image cannot reach containerd's store from a Containerfile, so the archive
+// is shipped in the rootfs and imported here, before configure -- which refuses
+// to configure a node whose kubelet image is missing.
+func importKubeletImage() {
+	if _, err := os.Stat(pid1KubeletTar); err != nil {
+		kmsg("kubelet image: %s not shipped: %v", pid1KubeletTar, err)
+		return
+	}
+	if out, err := exec.Command("ctr", "-n", "vates", "images", "ls", "-q").Output(); err == nil {
+		if strings.Contains(string(out), "vates/kubelet") {
+			kmsg("kubelet image: already present")
+			return
+		}
+	}
+	cmd := exec.Command("ctr", "-n", "vates", "images", "import", pid1KubeletTar)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		kmsg("kubelet image: import failed: %v", err)
+		return
+	}
+	kmsg("kubelet image imported")
+}
+
+// Pid1 is the entry point when the binary is PID 1. It never returns: it either
+// runs forever or reboots the machine.
+func Pid1(_ []string) error {
+	if os.Getpid() != 1 {
+		return fmt.Errorf("pid1: not PID 1 (pid %d); refusing to supervise", os.Getpid())
+	}
+	setPath()
+
+	if err := mountPseudo(); err != nil {
+		return err
+	}
+	// Before anything writes to /var: the container store, the kubelet's state
+	// and this process's own log must land on the /var partition, not on the
+	// root filesystem the mount would hide.
+	mountVar()
+	mountCNIOverlays()
+	redirectStdio()
+	assertReadOnlyRoot()
+	// Flush what has been written so far: the read-only probe is the node's
+	// first word about itself, and a machine that loses power a moment later
+	// must still have said it. The alternative is what a test measured -- a
+	// pid1.log of zero bytes, because a hard power-off does not flush the
+	// guest's page cache.
+	syscall.Sync()
+	applySysctls()
+	// On a machine with no screen, the serial console is the only place the
+	// bring-up can be read, and the quieting the sysctl just applied is there to
+	// protect a dashboard that does not exist. Un-mute it for the boot;
+	// startConsole mutes it again when the dashboard takes the console over.
+	if !tty.HasScreen() {
+		setConsoleLoglevel(7)
+		kmsg("console: no screen; the serial console carries the boot log")
+	}
+	makeRShared("/")
+	setHostname()
+	logDevices()
+	bootStep("mount", "ok")
+
+	// The splash comes first: it owns the screen until the console is ready, so
+	// the kernel's own chatter is replaced by what is actually happening.
+	startSplash()
+
+	bootStep("containerd", "wait")
+	if err := startContainerd(); err != nil {
+		kmsg("containerd: %v", err)
+		bootStep("containerd", "fail")
+	} else {
+		// ctr is used right after this -- the kubelet image import, and
+		// configure's kubeadm phases -- and fails until the socket exists.
+		// Measured on XCP-ng: containerd outran the network bring-up and PID 1
+		// used ctr before it was listening, which cost the whole control plane
+		// (see waitContainerd).
+		waitContainerd(30 * time.Second)
+		bootStep("containerd", "ok")
+	}
+	bootStep("network", "wait")
+	bringUpNetwork()
+	bootStep("network", "ok")
+	startGuestAgent()
+	bootStep("images", "wait")
+	importKubeletImage()
+	bootStep("images", "ok")
+	bootStep("configure", "wait")
+	dashboard.SetPhase("configuring the node")
+	configureNode()
+	bootStep("configure", "ok")
+	startNTP()
+	dashboard.SetPhase("starting the kubelet")
+	bootStep("kubelet", "wait")
+	startKubelet()
+	bootStep("kubelet", "ok")
+	go bootstrapNode()
+	startAPI()
+	stopSplash()
+	startConsole()
+	// The OS is up: make this slot's boot entry permanent, so it is no longer a
+	// trial that would be rolled back. Best-effort; see ab.go.
+	blessBoot()
+
+	return supervise()
+}
+
+// makeRShared makes a mount recursive-shared, as systemd does for / at boot.
+//
+// Without it, a container started with Linux.RootfsPropagation=rshared -- the
+// kubelet, whose projected service-account token is a tmpfs that must reach the
+// host so the pod sandboxes can mount it -- propagates nothing: a shared mount
+// under a private parent stays private. Measured: every pod failed with
+// "open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or
+// directory", kube-proxy and flannel crash-looping on it.
+func makeRShared(path string) {
+	if err := syscall.Mount("", path, "", syscall.MS_SHARED|syscall.MS_REC, ""); err != nil {
+		kmsg("mount: make-rshared %s: %v", path, err)
+	}
+}
+
+// cgroupV2Controllers are the controllers the kubelet, containerd and runc use.
+var cgroupV2Controllers = []string{"cpu", "cpuset", "io", "memory", "pids", "hugetlb"}
+
+// mountCgroupV2 mounts the cgroup v2 unified hierarchy and enables the
+// controllers the kubelet, containerd and runc need.
+//
+// v2, not v1: the kernel marks v1 deprecated ("cgroup v1 is in maintenance
+// mode"), and the earlier v2 failure was not the v2 design -- it was
+// CONFIG_CFS_BANDWIDTH missing from the kernel, which removes cpu.max on v2 just
+// as it removes cpu.cfs_period_us on v1. With the kernel fixed, v2 is the modern
+// layout and is what systemd-based systems use.
+//
+// On systemd, systemd enables these controllers at boot. With `vates` as PID 1
+// there is no systemd, so PID 1 does it. Each controller is written on its own:
+// a kernel without one must not stop the others.
+func mountCgroupV2() {
+	_ = os.MkdirAll("/sys/fs/cgroup", 0o755)
+	if err := syscall.Mount("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, ""); err != nil {
+		kmsg("cgroup2: mount /sys/fs/cgroup: %v", err)
+		return
+	}
+	const path = "/sys/fs/cgroup/cgroup.subtree_control"
+	for _, c := range cgroupV2Controllers {
+		if err := os.WriteFile(path, []byte("+"+c), 0); err != nil {
+			kmsg("cgroup2: +%s: %v", c, err)
+		}
+	}
+}
+
+// setPath gives the init process a usable PATH. The kernel starts init with
+// almost no environment, so exec.LookPath would only look in the current
+// directory and miss /sbin/udhcpc and /usr/sbin/ip.
+func setPath() {
+	_ = os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+}
+
+// mountPseudo mounts every entry of the table that is not already mounted and
+// whose target exists or can be created. A device or a base that already
+// provides one of them (a kernel with /dev pre-mounted, for instance) is not an
+// error.
+func mountPseudo() error {
+	for _, m := range pid1Mounts {
+		if err := os.MkdirAll(m.target, 0o755); err != nil {
+			return fmt.Errorf("pid1: mkdir %s: %w", m.target, err)
+		}
+		if isMountpoint(m.target) {
+			continue
+		}
+		if err := syscall.Mount(m.source, m.target, m.fstype, m.flags, m.data); err != nil {
+			if errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.ENODEV) {
+				continue
+			}
+			return fmt.Errorf("pid1: mount %s on %s: %w", m.fstype, m.target, err)
+		}
+	}
+	mountCgroupV2()
+	return nil
+}
+
+// isMountpoint reports whether path is already a mount point, by reading
+// /proc/self/mountinfo. Reading the file avoids re-mounting what an initramfs
+// or the base already mounted, which a bare mount would either duplicate or
+// fail on.
+func isMountpoint(path string) bool {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && fields[4] == path {
+			return true
+		}
+	}
+	return false
+}
+
+// bringUpNetwork brings the node's interface up and asks for a DHCP lease.
+//
+// There is no distribution and no network-online target here, so PID 1 owns it.
+// busybox's udhcpc does the lease for now -- it is the last busybox dependency
+// that matters, and replacing it with a Go client is a later step.
+func bringUpNetwork() {
+	// Bring loopback up first. The kubelet binds its healthz server and other
+	// endpoints to 127.0.0.1, and with lo down that bind fails ("cannot assign
+	// requested address"); nothing else here depends on it, which is why it was
+	// missed.
+	_ = exec.Command("ip", "link", "set", "lo", "up").Run()
+
+	iface := firstEthernet()
+	if iface == "" {
+		kmsg("network: no ethernet interface")
+		return
+	}
+	_ = exec.Command("ip", "link", "set", iface, "up").Run()
+	if _, err := exec.LookPath("udhcpc"); err != nil {
+		kmsg("network: %s is up but there is no udhcpc for a lease", iface)
+		return
+	}
+	cmd := exec.Command("udhcpc", "-i", iface, "-b", "-q", "-n", "-t", "10")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		kmsg("network: udhcpc on %s: %v", iface, err)
+		return
+	}
+	kmsg("network: lease obtained on %s", iface)
+}
+
+// firstEthernet returns the first non-loopback interface name.
+func firstEthernet() string {
+	ents, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return ""
+	}
+	for _, e := range ents {
+		if e.Name() != "lo" {
+			return e.Name()
+		}
+	}
+	return ""
+}
+
+// configureNode runs the first-boot configuration from the config drive, if
+// there is one. It is `vates-init configure`, in this same process: no
+// distribution, no unit to order it. A node with no config drive is not an
+// error -- it is a console-only boot.
+func configureNode() {
+	if _, err := os.Stat("/usr/local/bin/vates-init"); err != nil {
+		kmsg("configure: no vates-init: %v", err)
+		return
+	}
+	kmsg("configure: running vates-init configure")
+	if err := firstboot.Configure(firstboot.ConfigureOptions{}); err != nil {
+		kmsg("configure failed: %v", err)
+		// Surface the reason where an operator looks: the console reads the phase
+		// and shows it as its activity line. Without this a failed configure
+		// leaves the screen saying only "waiting for the API server", which is
+		// the symptom and never the cause.
+		dashboard.SetPhase("configure failed: " + err.Error())
+		return
+	}
+	kmsg("configure complete")
+}
+
+// startKubelet starts the kubelet container through the runner. Under systemd
+// this was k8s-kubelet.service; under PID 1 it is a child.
+func startKubelet() {
+	if _, err := os.Stat(pid1KubeletRun); err != nil {
+		kmsg("kubelet: %s: %v", pid1KubeletRun, err)
+		return
+	}
+	if err := startChild("kubelet", pid1KubeletRun, kubeletArgs()...); err != nil {
+		kmsg("kubelet: %v", err)
+	}
+}
+
+// bootstrapNode runs the cluster-wide bootstrap, as the systemd unit did after
+// the kubelet had started.
+//
+// It runs on EVERY node, and neither a gate nor a wait is wanted here.
+//
+// Not gated on /etc/kubernetes/manifests: a control plane that JOINS has none
+// yet -- `kubeadm join` is what writes them -- so gating on the directory skips
+// the join on exactly the machines that need it, and they come up as ordinary
+// nodes with no error anywhere. firstboot.Bootstrap already returns immediately
+// for a worker, so there is nothing to protect against.
+//
+// Not preceded by a wait for the LOCAL API server: a joining control plane has
+// no local API server until the join itself starts one, so waiting for it first
+// is a deadlock -- on the Bootstrapping node it is redundant, since Bootstrap's
+// own waitForAPI already waits on the control plane endpoint.
+func bootstrapNode() {
+	kmsg("bootstrap: running vates-init bootstrap")
+	if err := firstboot.BootstrapNode(firstboot.BootstrapOptions{}); err != nil {
+		kmsg("bootstrap failed: %v", err)
+		dashboard.SetPhase("bootstrap failed: " + err.Error())
+		return
+	}
+	kmsg("bootstrap complete")
+	// Not "ready": bootstrap done is not the node Ready. The kubelet may still
+	// be pulling the control plane's images. The console hides the activity line
+	// once the node itself reports Ready, so this is what it shows until then.
+	dashboard.SetPhase("waiting for the node to become ready")
+}
+
+// startAPI starts the node's management API. It is the only way to ask the node
+// anything -- there is no shell and no sshd -- and it is what an operator or
+// vateskctl talks to. Configure has written its certificate material by now.
+func startAPI() {
+	if _, err := os.Stat(pid1API); err != nil {
+		kmsg("api: %s: %v", pid1API, err)
+		return
+	}
+	if err := startChild("vates-api", pid1API); err != nil {
+		kmsg("api: %v", err)
+	}
+}
+
+// startGuestAgent brings up the Xen guest agent: the OS-identification script
+// first -- it writes the cache xe-daemon reads, and without it Xen Orchestra
+// shows no OS for the VM -- then the daemon itself.
+//
+// Best effort, and a no-op off Xen: /proc/xen/xenbus only exists in a Xen guest,
+// and the daemon logs and exits at once elsewhere (the libvirt test cluster).
+// The daemon is a supervised child, so the SIGTERM a clean shutdown sends to
+// every child reaches it.
+func startGuestAgent() {
+	// /proc/xen exists only in a Xen guest: CONFIG_XEN_COMPAT_XENFS creates it
+	// when the kernel has detected the hypervisor. Off Xen -- the libvirt test
+	// cluster -- there is nothing to publish, and starting a daemon that would
+	// exit at once is only noise.
+	if _, err := os.Stat("/proc/xen"); err != nil {
+		return
+	}
+	if _, err := os.Stat(pid1XeDaemon); err != nil {
+		kmsg("xe-daemon: %s: %v", pid1XeDaemon, err)
+		return
+	}
+	// /var/cache is a symlink to /tmp in the rootfs, which the /var partition
+	// mount hides; on the partition itself the directory has to be created.
+	if err := os.MkdirAll(filepath.Dir(pid1XeOSCache), 0o755); err != nil {
+		kmsg("xe-daemon: mkdir %s: %v", filepath.Dir(pid1XeOSCache), err)
+	}
+	if _, err := os.Stat(pid1XeDistroInfo); err == nil {
+		if out, err := exec.Command(pid1XeDistroInfo, pid1XeOSCache).CombinedOutput(); err != nil {
+			kmsg("xe-linux-distribution: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+	if err := startChild("xe-daemon", pid1XeDaemon); err != nil {
+		kmsg("xe-daemon: %v", err)
+	}
+}
+
+// kubeletArgs builds the command line the systemd unit used to carry. The
+// per-node values (NODE_NAME, NODE_IP, the bootstrap kubeconfig) are read from
+// the drop-in configure wrote, so there is one source for them rather than a
+// second copy here.
+func kubeletArgs() []string {
+	return kubeletArgsFromEnv(dropInEnv(firstboot.KubeletDropIn))
+}
+
+// kubeletArgsFromEnv builds the kubelet's command line from the drop-in
+// environment. Split from kubeletArgs so the mapping -- which value becomes
+// which flag -- is testable without a file on disk.
+func kubeletArgsFromEnv(env map[string]string) []string {
+	args := []string{
+		"/usr/local/bin/kubelet",
+		"--config=/etc/kubelet/kubelet.conf",
+		"--root-dir=/var/lib/kubelet",
+		"--kubeconfig=/etc/kubernetes/kubelet.conf",
+		"--client-ca-file=/etc/kubernetes/pki/ca.crt",
+	}
+	if v := env["NODE_NAME"]; v != "" {
+		args = append(args, "--hostname-override="+v)
+	}
+	if v := env["NODE_IP"]; v != "" {
+		args = append(args, "--node-ip="+v)
+	}
+	if v := env["KUBELET_BOOTSTRAP_KUBECONFIG"]; v != "" {
+		args = append(args, "--bootstrap-kubeconfig="+v)
+	}
+	// The kubelet stands down for an external cloud controller manager: it
+	// stops managing the node's own lifecycle (labels, providerID, deletion)
+	// and leaves it to the CCM. Reading it from the drop-in keeps the value a
+	// property of the machine, written by vates-init from vates-node.yaml.
+	if v := env["CLOUD_PROVIDER"]; v != "" {
+		args = append(args, "--cloud-provider="+v)
+	}
+	return args
+}
+
+// dropInEnv reads Environment=KEY=VALUE lines from a systemd drop-in.
+func dropInEnv(path string) map[string]string {
+	m := map[string]string{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return m
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		kv, ok := strings.CutPrefix(strings.TrimSpace(line), "Environment=")
+		if !ok {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		m[k] = v
+	}
+	return m
+}
+
+// consoleEnv is what the console child is started with: this process's own
+// environment, plus the mode the machine chose.
+//
+// The mode is the machine's, not the image's, and vates-init writes it for the
+// console the same way it writes the kubelet's values -- as a systemd drop-in
+// (firstboot.ConsoleDropIn). A pid1 image has no systemd to read that drop-in
+// and put DASHBOARD_MODE into the console's environment, which is what the
+// drop-in assumes, so this process reads it instead, exactly as it reads the
+// kubelet's drop-in for the kubelet's flags. Nothing to say is nil, which makes
+// the child inherit this environment and keep the console's own default.
+func consoleEnv(dropIn string) []string {
+	mode := dropInEnv(dropIn)["DASHBOARD_MODE"]
+	if mode == "" {
+		return nil
+	}
+	return append(os.Environ(), "DASHBOARD_MODE="+mode)
+}
+
+// logDevices records what the console will find, in the kernel log: whether a
+// DRM card and a framebuffer exist. This is the first thing to look at when the
+// picture does not come up, and it is invisible from the console itself.
+func logDevices() {
+	for _, p := range []string{"/dev/dri/card0", "/dev/fb0"} {
+		if _, err := os.Stat(p); err == nil {
+			kmsg("device present: %s", p)
+		} else {
+			kmsg("device absent: %s (%v)", p, err)
+		}
+	}
+}
+
+// bootLines is the walk through bring-up, and bootSplash the splash child that
+// paints it. Neither must be read while it is being written, hence the mutex.
+var (
+	bootMu     sync.Mutex
+	bootLines  []splashStep
+	bootSplash int
+)
+
+// bootStep records one phase of bring-up and rewrites the status file the splash
+// reads. A label already present is updated in place, so a phase can be marked
+// "wait" and then "ok" without appearing twice.
+func bootStep(label, state string) {
+	bootMu.Lock()
+	updated := false
+	for i := range bootLines {
+		if bootLines[i].label == label {
+			bootLines[i].state = state
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		bootLines = append(bootLines, splashStep{label: label, state: state})
+	}
+	bootMu.Unlock()
+	writeBootStatus()
+}
+
+// bootDone tells the splash the console is about to take the screen over.
+func bootDone() {
+	bootMu.Lock()
+	bootLines = append(bootLines, splashStep{label: "done", state: "ok"})
+	bootMu.Unlock()
+	writeBootStatus()
+}
+
+func writeBootStatus() {
+	bootMu.Lock()
+	var b strings.Builder
+	for _, s := range bootLines {
+		fmt.Fprintf(&b, "%s|%s\n", s.label, s.state)
+	}
+	data := b.String()
+	bootMu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(BootStatusFile), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(BootStatusFile, []byte(data), 0o644)
+}
+
+// startSplash launches the boot screen and records it as a supervised child.
+func startSplash() {
+	if _, err := os.Stat(pid1Splash); err != nil {
+		return
+	}
+	cmd := exec.Command(pid1Splash)
+	if err := cmd.Start(); err != nil {
+		kmsg("splash: %v", err)
+		return
+	}
+	bootMu.Lock()
+	bootSplash = cmd.Process.Pid
+	bootMu.Unlock()
+	childrenMu.Lock()
+	children[cmd.Process.Pid] = "splash"
+	childrenMu.Unlock()
+	kmsg("splash: started (pid %d)", cmd.Process.Pid)
+}
+
+// stopSplash marks the boot done and waits for the splash to release the DRM
+// device, so the console can take it: two programs drawing the same card is a
+// race, and the loser is the picture.
+func stopSplash() {
+	bootDone()
+	bootMu.Lock()
+	pid := bootSplash
+	bootSplash = 0
+	bootMu.Unlock()
+	if pid <= 0 {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	for i := 0; i < 40; i++ {
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// setHostname applies the hostname vates-init recorded (firstboot.HostnameFile,
+// under /var because the root is read-only). Failure is not fatal: a node with
+// the default hostname still runs, and refusing to boot over it would be worse.
+func setHostname() {
+	data, err := os.ReadFile(firstboot.HostnameFile)
+	if err != nil {
+		return
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		return
+	}
+	_ = syscall.Sethostname([]byte(name))
+}
+
+// waitContainerd blocks until the containerd socket exists, or gives up. It is
+// a dependency wait, not a delay: it returns as soon as the socket appears, and
+// only a runtime that never comes up pays the timeout.
+//
+// Measured on XCP-ng: containerd can be slower to listen than the network
+// bring-up that follows it, and PID 1 used ctr before it was ready --
+//
+//	ctr: cannot access socket /run/containerd/containerd.sock
+//
+// configure then failed its kubelet-image check and never ran the kubeadm
+// phases (certs, kubeconfig, etcd, control-plane), so
+// /etc/kubernetes/pki/ca.crt and the static-pod manifests were never written:
+// the kubelet died on the missing CA, and bootstrap waited for an API server
+// that could never start. The wait is what makes the control plane's boot not a
+// race.
+func waitContainerd(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(pid1ContainerdSocket); err == nil {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			kmsg("containerd: no socket at %s after %s; continuing without it",
+				pid1ContainerdSocket, timeout)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// startContainerd launches the container runtime. It is not re-started here on
+// exit: a runtime that dies is a bug worth seeing, and the reap loop reports
+// it. Starting it before the console means the console can show CRI state.
+func startContainerd() error {
+	if _, err := os.Stat(pid1Containerd); err != nil {
+		return err
+	}
+	return startChild("containerd", pid1Containerd, "--config", pid1ContainerdConf)
+}
+
+// setConsoleLoglevel sets what reaches the consoles. The sysctl takes four
+// numbers; only the first (the console level) and the fourth (its default) are
+// of interest, the other two are left where the image put them. A message
+// prints when its level is LOWER than this, so 7 lets emerg..info through -- a
+// normal boot log -- and 3 keeps only emerg/alert/crit, which is what the
+// dashboard wants.
+func setConsoleLoglevel(level int) {
+	_ = os.WriteFile("/proc/sys/kernel/printk",
+		[]byte(fmt.Sprintf("%d 4 1 %d\n", level, level)), 0o644)
+}
+
+// consoleTTY picks the terminal the console draws on. A machine with a DRM card
+// gets the VGA virtual console, as it always did. A machine with none -- a VM
+// with no VGA, a headless one -- still has a console, the serial or Xen one,
+// which /dev/console resolves to (hvc0 under Xen, ttyS0 under KVM); the text
+// dashboard is the one face that works there.
+//
+// The choice is a plain stat, not a wait: the DRM drivers are built in, and
+// SYSFB_SIMPLEFB gives a card from the firmware framebuffer in any case, so
+// card0 is present before PID 1 runs whenever there is a screen at all. Nothing
+// here may add latency to a boot this short.
+func consoleTTY() (dev string, vga bool) {
+	if tty.HasScreen() {
+		return "/dev/tty1", true
+	}
+	// No screen: the serial console, the one an operator reaches out of band
+	// (XCP-ng's xe console, libvirt's virsh console). hvc0 is Xen's console,
+	// ttyS0 the emulated UART; both are named before /dev/console because which
+	// device /dev/console IS depends on registration order, and it can still be
+	// the dead VGA VT on a machine that has no screen.
+	for _, d := range []string{"/dev/hvc0", "/dev/ttyS0"} {
+		if _, err := os.Stat(d); err == nil {
+			return d, false
+		}
+	}
+	return "/dev/console", false
+}
+
+// startConsole launches the dashboard on the machine's console. It gets a real
+// controlling terminal (Setsid + Setctty), not just a redirected stdout: a
+// termcap UI needs a tty to size itself and read keys, and without one it either
+// fails or draws nowhere. Failures go to /dev/kmsg, because the console cannot
+// report its own absence anywhere the console would be seen.
+func startConsole() {
+	if _, err := os.Stat(pid1Console); err != nil {
+		kmsg("console: %s: %v", pid1Console, err)
+		return
+	}
+	dev, vga := consoleTTY()
+	f, err := os.OpenFile(dev, os.O_RDWR, 0)
+	if err != nil {
+		kmsg("console: open %s: %v", dev, err)
+		return
+	}
+	// Only a virtual console has one to activate; on the serial/Xen console the
+	// ioctl has nothing to switch.
+	if vga {
+		activateVT(f.Fd(), 1)
+	} else {
+		// The dashboard owns the serial console from here: quiet the kernel
+		// again, so its lines and the CNI's do not print over it.
+		setConsoleLoglevel(3)
+	}
+
+	cmd := exec.Command(pid1Console)
+	cmd.Stdin = f
+	cmd.Stdout = f
+	// The mode reaches the console through its environment, the way the drop-in
+	// assumes systemd would deliver it; there is no systemd here, so it is read
+	// and passed on (consoleEnv).
+	cmd.Env = consoleEnv(firstboot.ConsoleDropIn)
+	// stderr goes to the kernel log, not the tty: when the graphical console
+	// falls back to text, its reason is written to stderr, and it would
+	// otherwise be printed to the very console it failed to become.
+	pr, pw, perr := os.Pipe()
+	if perr == nil {
+		cmd.Stderr = pw
+	} else {
+		cmd.Stderr = f
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid:  true,
+		Setctty: true,
+		// Ctty is a descriptor number *in the child*. Stdin/Stdout/Stderr are
+		// the tty, so they are 0, 1 and 2 there; naming the parent's fd here is
+		// what fails with "Setctty set but Ctty not valid in child".
+		Ctty: 0,
+	}
+	if err := cmd.Start(); err != nil {
+		kmsg("console: start: %v", err)
+		return
+	}
+	if perr == nil {
+		if err := pw.Close(); err != nil {
+			kmsg("console: close the stderr pipe: %v", err)
+		}
+		go func() {
+			sc := bufio.NewScanner(pr)
+			for sc.Scan() {
+				kmsg("console stderr: %s", sc.Text())
+			}
+		}()
+	}
+	kmsg("console: started (pid %d) on %s", cmd.Process.Pid, dev)
+	consoleMu.Lock()
+	consoleStartedAt = time.Now()
+	consoleMu.Unlock()
+	childrenMu.Lock()
+	children[cmd.Process.Pid] = "console"
+	childrenMu.Unlock()
+}
+
+// restartConsole brings the console back after it exited on its own.
+//
+// Rate-limited: a console that starts and dies at once -- a mode the kernel
+// refuses, a card that went away -- would otherwise fork as fast as the kernel
+// reaps, filling the log with the same reason. One restart a second is still
+// immediate to someone standing at the machine, and it is bounded.
+func restartConsole() {
+	consoleMu.Lock()
+	wait := time.Until(consoleStartedAt.Add(time.Second))
+	consoleMu.Unlock()
+	if wait > 0 {
+		time.Sleep(wait)
+	}
+	// The machine may have begun shutting down while this waited.
+	if shuttingDown.Load() {
+		return
+	}
+	kmsg("console: restarting")
+	startConsole()
+}
+
+// vtActivate is the Linux VT_ACTIVATE ioctl (from linux/vt.h). The argument is a
+// value, not a pointer, so no unsafe is needed.
+const vtActivate = 0x5606
+
+func activateVT(fd uintptr, n int) {
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, fd, vtActivate, uintptr(n))
+}
+
+// kmsg writes one line to the kernel log, which is visible on a serial console
+// and in `dmesg` even when the userspace console shows nothing.
+func kmsg(format string, args ...any) {
+	f, err := os.OpenFile("/dev/kmsg", os.O_WRONLY, 0)
+	if err != nil {
+		return
+	}
+	// The kernel log is best effort: there is nowhere else to report a failure
+	// to write to it -- or to close it, which is why the close error is dropped.
+	defer func() { _ = f.Close() }()
+	_, _ = fmt.Fprintf(f, "vates-pid1: "+format+"\n", args...)
+}
+
+// rebootAction maps a signal to what the machine should do. It is pure so the
+// policy can be tested without being PID 1.
+func rebootAction(sig syscall.Signal) string {
+	switch sig {
+	case syscall.SIGTERM, syscall.SIGINT, syscall.SIGPWR:
+		return "poweroff"
+	case syscall.SIGUSR2:
+		return "reboot"
+	}
+	return ""
+}
+
+// supervise waits for signals forever. SIGCHLD reaps zombies; a shutdown signal
+// stops the children and powers the machine off.
+func supervise() error {
+	sigs := make(chan os.Signal, 16)
+	signal.Notify(sigs, syscall.SIGCHLD, syscall.SIGTERM, syscall.SIGINT, syscall.SIGPWR, syscall.SIGUSR2)
+
+	for s := range sigs {
+		sysSig, ok := s.(syscall.Signal)
+		if !ok {
+			continue
+		}
+		if sysSig == syscall.SIGCHLD {
+			reap()
+			continue
+		}
+		switch rebootAction(sysSig) {
+		case "poweroff":
+			shutdown(syscall.LINUX_REBOOT_CMD_POWER_OFF)
+		case "reboot":
+			shutdown(syscall.LINUX_REBOOT_CMD_RESTART)
+		}
+	}
+	return nil
+}
+
+// children maps a supervised child's pid to a name, so the single reaper can say
+// what exited.
+var (
+	childrenMu sync.Mutex
+	children   = map[int]string{}
+)
+
+// shuttingDown is set once PID 1 has begun powering off or rebooting. It stops
+// the console from being restarted while the children are being stopped: the
+// console is the one child that is brought back, and it must not be brought back
+// on top of a machine that is going down.
+var shuttingDown atomic.Bool
+
+// consoleMu guards consoleStartedAt, the last time the console was launched.
+var (
+	consoleMu        sync.Mutex
+	consoleStartedAt time.Time
+)
+
+// pid1LogDir holds one file per supervised service. Nothing writes to the
+// console: the splash owns the screen until the dashboard does, and a daemon
+// that prints on it would draw over both.
+const pid1LogDir = "/var/log/vates"
+
+// redirectStdio points PID 1's own stdout and stderr at a file on disk.
+//
+// Init is started with the console as its output, so without this every line the
+// configure and bootstrap steps print lands on the screen the splash is
+// painting -- and, worse, nowhere that survives: the steps that fail run in this
+// process, and there is no shell to read the kernel ring buffer afterwards.
+// Explicit kmsg() calls still go to the kernel log; this keeps the program's own
+// output where an operator (or an offline read of the disk) can find it.
+//
+// /var/lib/vates, not /var/log: /var/log is a symlink to /tmp on this image, and
+// /tmp is a tmpfs PID 1 mounts -- a log written there is gone on the next boot,
+// and gone the moment the machine is powered off, which is exactly when it is
+// wanted. /var/lib is on the /var partition, which persists.
+const pid1LogFile = "/var/lib/vates/pid1.log"
+
+func redirectStdio() {
+	if err := os.MkdirAll(filepath.Dir(pid1LogFile), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(pid1LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	// Closing the original handle says nothing: fds 1 and 2 are duplicates made
+	// with Dup2 below and remain open on the same file.
+	defer func() { _ = f.Close() }()
+	fd := int(f.Fd())
+	_ = syscall.Dup2(fd, 1)
+	_ = syscall.Dup2(fd, 2)
+}
+
+// roProbe is the path assertReadOnlyRoot tries to create. At the root of the
+// read-only filesystem, so nothing else has a reason to be there.
+const roProbe = "/.vates-readonly-probe"
+
+// assertReadOnlyRoot checks the property this whole layout exists to have: the
+// root filesystem cannot be written -- while the paths a workload MUST be able
+// to write stay writable.
+//
+// It does not read the mount options. A remount, or a kernel command line that
+// lost its `ro`, still READS as read-only while the write succeeds -- so the
+// check writes, and reports the effect, exactly as the plan in
+// docs/IMMUTABILITY.md says a check must. The result goes to this process's
+// output, which redirectStdio has already pointed at /var/lib/vates/pid1.log,
+// where an offline read of the disk finds it without a login.
+//
+// The second probe is the other half of the same property: /opt/cni/bin is an
+// overlay, and a CNI installer has to be able to write there. A root that is
+// read-only because the overlays are missing would be a node whose CNI can never
+// install, which is not the same thing at all.
+func assertReadOnlyRoot() {
+	err := os.WriteFile(roProbe, []byte("x"), 0o600)
+	switch {
+	case err == nil:
+		_ = os.Remove(roProbe)
+		fmt.Println("root: WRITABLE -- the read-only root is NOT enforced")
+		kmsg("root: WRITABLE (the read-only root is NOT enforced)")
+	case errors.Is(err, syscall.EROFS):
+		fmt.Println("root: read-only (ok)")
+	default:
+		// Not writable, but not EROFS either (EACCES, ENOSPC, ...). Worth
+		// saying, because it is not the reason the write failed.
+		fmt.Printf("root: not writable, but not EROFS: %v\n", err)
+	}
+
+	const cniProbe = "/opt/cni/bin/.vates-writable-probe"
+	if err := os.WriteFile(cniProbe, []byte("x"), 0o600); err == nil {
+		_ = os.Remove(cniProbe)
+		fmt.Println("cni: /opt/cni/bin writable (ok)")
+	} else {
+		fmt.Printf("cni: /opt/cni/bin NOT writable: %v\n", err)
+	}
+
+	// The third probe is the same property for the path a control-plane pod
+	// declares as a `DirectoryOrCreate` hostPath: containerd creates it on the
+	// host before the container can start. Its default sits under /usr/libexec,
+	// which a read-only root cannot create, so the image makes it a symlink into
+	// /var whose target PID 1 created in mountVar a moment ago
+	// (board/vates/overlay/usr/libexec, internal/app/grow.go). A node that
+	// forgot this is a node whose controller-manager never leaves
+	// CreateContainerError, with the failure inside the CRI and not in the pod's
+	// events -- measured, and the reason this probe exists.
+	const flexvolDir = "/usr/libexec/kubernetes/kubelet-plugins/volume/exec"
+	flexvolProbe := flexvolDir + "/.vates-writable-probe"
+	if err := os.WriteFile(flexvolProbe, []byte("x"), 0o600); err == nil {
+		_ = os.Remove(flexvolProbe)
+		fmt.Printf("flexvol: %s writable (ok)\n", flexvolDir)
+	} else {
+		fmt.Printf("flexvol: %s NOT writable: %v\n", flexvolDir, err)
+	}
+
+	// Which slot booted, for A/B. The PARTUUID is the whole answer: which one it
+	// is (a or b) is a property of the boot entries, read where they are needed.
+	if uuid, err := ab.RootPartUUID(); err == nil {
+		fmt.Printf("root: PARTUUID %s\n", uuid)
+	}
+}
+
+// pid1SysctlFiles are read in this order, as systemd-sysctl does.
+var pid1SysctlFiles = []string{"/etc/sysctl.d/99-vates.conf"}
+
+// applySysctls writes the drop-ins under /etc/sysctl.d to /proc/sys.
+//
+// On a systemd distribution systemd-sysctl does this. With `vates` as PID 1
+// nothing does it, and the config sits on disk unapplied -- which is invisible
+// until something needs it. What needed it: `kubeadm join` refuses to run with
+//
+//	[ERROR FileContent--proc-sys-net-ipv4-ip_forward]:
+//	/proc/sys/net/ipv4/ip_forward contents are not set to 1
+//
+// so a joining control plane retried its four attempts and never joined, while
+// the bootstrapping control plane (whose phases skip the preflight) worked. It
+// is also what makes kube-proxy's bridge rules match, so pod traffic is not
+// forwarded across the CNI bridge without it.
+//
+// Best effort per key: a key whose module is not loaded does not exist, and one
+// absent key must not stop the others.
+func applySysctls() {
+	for _, path := range pid1SysctlFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+				continue
+			}
+			key, value, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+			if key == "" || value == "" {
+				continue
+			}
+			proc := "/proc/sys/" + strings.ReplaceAll(key, ".", "/")
+			if err := os.WriteFile(proc, []byte(value), 0o644); err != nil {
+				kmsg("sysctl: %s=%s: %v", key, value, err)
+			}
+		}
+	}
+}
+
+// childLog opens the log file for a supervised child, falling back to the
+// kernel log if the directory cannot be created.
+func childLog(name string) *os.File {
+	if err := os.MkdirAll(pid1LogDir, 0o755); err != nil {
+		if f, err := os.OpenFile("/dev/kmsg", os.O_WRONLY, 0); err == nil {
+			return f
+		}
+		return os.Stdout
+	}
+	f, err := os.OpenFile(filepath.Join(pid1LogDir, name+".log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return os.Stdout
+	}
+	return f
+}
+
+// startChild starts a supervised child and records it for the reaper. It does
+// NOT call exec.Cmd.Wait: PID 1 must reap every child itself, and a generic
+// Wait4(-1) racing a Cmd.Wait on the same pid makes one of them fail with
+// ECHILD ("waitid: no child processes").
+func startChild(name, path string, args ...string) error {
+	cmd := exec.Command(path, args...)
+	log := childLog(name)
+	cmd.Stdout = log
+	cmd.Stderr = log
+	err := cmd.Start()
+	// Close the parent's copy: the child holds its own. os.Stdout is the
+	// fallback and must never be closed.
+	if log != os.Stdout {
+		if cerr := log.Close(); cerr != nil {
+			kmsg("child log: %s: close: %v", name, cerr)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	childrenMu.Lock()
+	children[cmd.Process.Pid] = name
+	childrenMu.Unlock()
+	kmsg("%s: started (pid %d)", name, cmd.Process.Pid)
+	return nil
+}
+
+// reap collects every child that has exited, without blocking, and names it.
+// PID 1 is responsible for this or the process table fills with zombies.
+func reap() {
+	for {
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+		if pid <= 0 || err != nil {
+			return
+		}
+		childrenMu.Lock()
+		name := children[pid]
+		delete(children, pid)
+		childrenMu.Unlock()
+		if name == "" {
+			name = "child"
+		}
+		kmsg("%s exited (pid %d)", name, pid)
+		// A supervised service that dies is a bring-up that will not finish.
+		// Say so on the console's activity line, where an operator is looking,
+		// rather than only on the kernel log -- the screen otherwise keeps
+		// showing "waiting for the API server", which is the symptom.
+		if name != "console" && !shuttingDown.Load() {
+			dashboard.SetPhase(fmt.Sprintf("%s exited; see its log", name))
+		}
+		// The console is the machine's face and must not be left dead. It
+		// ignores Ctrl-C itself; this is the backstop for a crash, a bad mode,
+		// or a signal it does catch. It is NOT restarted during shutdown, where
+		// the child was stopped on purpose.
+		if name == "console" && !shuttingDown.Load() {
+			restartConsole()
+		}
+	}
+}
+
+// shutdown stops the children, flushes the filesystems and reboots or powers
+// off. The Reboot call does not return.
+func shutdown(cmd int) {
+	shuttingDown.Store(true)
+	_ = syscall.Kill(-1, syscall.SIGTERM)
+	syscall.Sync()
+	_ = syscall.Reboot(cmd)
+	// If Reboot failed (no permission, no initramfs hook), fall back to a hard
+	// exit so the kernel can panic and be restarted by the hypervisor rather
+	// than hang.
+	os.Exit(1)
+}

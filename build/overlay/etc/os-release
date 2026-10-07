@@ -1,0 +1,15 @@
+NAME="Vates Kube OS"
+ID=vates
+ID_LIKE="rhel"
+VERSION="0.1.0"
+VERSION_ID="0.1.0"
+PRETTY_NAME="Vates Kube OS 0.1.0"
+ANSI_COLOR="0;34"
+CPE_NAME="cpe:/o:vates:vates_kube_os:0.1.0"
+
+# The kubelet is a FROM-scratch container with no os-release of its own; the
+# host's file is bind-mounted into it so `kubectl get nodes` reports this system
+# as `osImage` rather than a bare Linux.
+#
+# ID_LIKE names the RHEL family on purpose: tools that key on it (some CNI and
+# CSI installers) recognise the userspace the image carries.

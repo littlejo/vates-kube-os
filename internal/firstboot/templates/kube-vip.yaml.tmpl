@@ -1,0 +1,110 @@
+# kube-vip as a static pod: it owns the control plane's virtual IP.
+#
+# This is the document that
+#   kube-vip manifest pod --interface <if> --address <vip> \
+#                         --controlplane --arp --leaderElection
+# generates. The environment variable names are kube-vip's, not ours, so they
+# are reproduced exactly; renaming one silently disables the feature it controls.
+#
+# kube-vip is used rather than reimplemented. Claiming an address means ARP
+# announcements, detecting the current holder, and leader election against the
+# API server -- all of which kube-vip already does, which makes it one more file
+# in the same manifests directory as etcd and kube-apiserver rather than a second
+# mechanism to write, test and maintain.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-vip
+  namespace: kube-system
+spec:
+  containers:
+  - name: kube-vip
+    image: {{.Image}}
+    # Not "Always": this manifest is rendered at boot from a config file, and a
+    # floating tag would mean two nodes brought up a week apart can be running
+    # different kube-vip builds.
+    imagePullPolicy: IfNotPresent
+    args:
+    - manager
+    env:
+    # Advertise the address with ARP on the local link.
+    - name: vip_arp
+      value: "true"
+    - name: address
+      value: "{{.VIP}}"
+    - name: port
+      value: "{{.Port}}"
+    - name: vip_interface
+      value: "{{.Interface}}"
+    - name: vip_subnet
+      value: "{{.Subnet}}"
+    # Control plane mode: this is what makes the VIP follow whichever API server
+    # is currently the leader.
+    # The API server address kube-vip uses on THIS machine.
+    #
+    # Without it, kube-vip in control-plane mode builds the address itself as
+    # "kubernetes:<port>" and relies on a host alias in the pod to resolve that
+    # name. Its own manifest generator adds that alias, and it was tried here --
+    # the pod's /etc/hosts did contain the entry -- yet kube-vip still failed
+    # with
+    #   error retrieving resource lock kube-system/plndr-cp-lock:
+    #   Get "https://kubernetes:6443/...": dial tcp: lookup kubernetes on
+    #   <resolver>: no such host
+    # and the VIP never appeared.
+    #
+    # Setting the address explicitly takes the branch kube-vip reserves for it
+    # and removes the name resolution entirely.
+    #
+    # The address is this node's own, NOT 127.0.0.1: the API server certificate
+    # lists the service address, the node's address and the VIP, but not the
+    # loopback address. Pointing kube-vip at 127.0.0.1 gets
+    #   x509: certificate is valid for 10.96.0.1, <node ip>, <vip>, not 127.0.0.1
+    # and leader election never starts.
+    - name: kubernetes_addr
+      value: "{{.NodeIP}}:{{.Port}}"
+    - name: cp_enable
+      value: "true"
+    - name: cp_namespace
+      value: kube-system
+    - name: vip_leaderelection
+      value: "true"
+    - name: vip_leaseduration
+      value: "15"
+    - name: vip_renewdeadline
+      value: "10"
+    - name: vip_retryperiod
+      value: "2"
+    securityContext:
+      capabilities:
+        add:
+        # Adding an address to an interface, and sending ARP, need these.
+        - NET_ADMIN
+        - NET_RAW
+        - SYS_TIME
+    # The container path is FIXED at /etc/kubernetes/admin.conf, and only the
+    # host path varies.
+    #
+    # This asymmetry is kube-vip's, not a choice made here: its K8sConfigFile
+    # setting (the k8s_config_file environment variable) is read by the manifest
+    # GENERATOR, which uses it as the host path and hardcodes the mount path as
+    # /etc/kubernetes/admin.conf. The running process then loads that fixed path.
+    # Setting k8s_config_file changes nothing at runtime, and mounting elsewhere
+    # -- which is what this manifest did -- leaves kube-vip finding neither a
+    # kubeconfig nor in-cluster credentials:
+    #   could not create k8s REST config from incluster file: "/.kube/config":
+    #   KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be defined
+    # with the VIP never appearing and nothing pointing at the mount.
+    #
+    # The host path is super-admin.conf rather than admin.conf because since
+    # Kubernetes 1.29 admin.conf is not usable until the cluster's
+    # cluster-admins binding exists, which happens later in the bootstrap.
+    volumeMounts:
+    - mountPath: /etc/kubernetes/admin.conf
+      name: kubeconfig
+      readOnly: true
+  hostNetwork: true
+  volumes:
+  - name: kubeconfig
+    hostPath:
+      path: {{.HostKubeconfigPath}}
+      type: File

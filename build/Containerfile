@@ -1,0 +1,221 @@
+# syntax=docker/dockerfile:1
+#
+# Vates Kube OS -- from-scratch builder.
+#
+# Builds the node's userspace from pinned upstream sources. Podman is the
+# first-class target; the file is plain Dockerfile syntax so `docker build`
+# works too.
+#
+# The base is Fedora (RHEL-family; no Debian). It is only the BUILD HOST: its
+# gcc is the seed compiler, and it is not a distribution we assemble the image
+# from. What the image ships is a glibc we build ourselves (pass -1) and the
+# components below.
+#
+# Layout: one stage per pass of the dependency graph (see docs/BUILD.md),
+# one COPY + RUN per component so each component caches on its own.
+#
+#   pass -1  libc     : GNU kernel headers + glibc, from source, into /sysroot
+#   pass  2  socle    : zlib, XML, FFI, regex, image/DRM primitives
+#   pass  3  tools    : busybox, util-linux, e2fsprogs, ...
+#   pass  4  console  : freetype -> fontconfig -> glib -> cairo -> harfbuzz -> pango
+#   pass  1  kernel   : linux + kernel.fragment
+#   pass  6  assemble : systemd-boot, kubelet image, genimage (the assembler)
+#
+# /sysroot is the staging tree: the libc pass seeds it, every recipe installs
+# into it with DESTDIR, and every compile points at it with --sysroot.
+
+ARG BASE=registry.fedoraproject.org/fedora:44
+
+# --- pass -1: libc ----------------------------------------------------------
+FROM ${BASE} AS libc
+RUN set -eux; \
+	dnf -y --setopt=install_weak_deps=False install \
+		gcc gcc-c++ make meson ninja-build pkgconf-pkg-config \
+		gperf bison flex python3 curl xz file ca-certificates \
+		gawk perl sed grep findutils tar gzip bzip2 diffutils which \
+		glibc-devel rsync cpio bc patch \
+		elfutils-libelf-devel openssl-devel dwarves gettext cmake; \
+	dnf clean all
+COPY pins.conf /build/pins.conf
+COPY lib/common.sh /build/lib/common.sh
+COPY lib/cross.ini /build/lib/cross.ini
+COPY lib/run-recipe.sh /build/lib/run-recipe.sh
+COPY lib/build-libc.sh /build/lib/build-libc.sh
+COPY dl /src/dl
+RUN bash /build/lib/build-libc.sh
+
+# --- pass 2: socle ----------------------------------------------------------
+# Base libraries the rest of the userspace links against.
+FROM libc AS socle
+COPY recipes/socle/libzlib.sh /build/recipes/socle/libzlib.sh
+RUN /build/lib/run-recipe.sh libzlib
+COPY recipes/socle/expat.sh /build/recipes/socle/expat.sh
+RUN /build/lib/run-recipe.sh expat
+COPY recipes/socle/libffi.sh /build/recipes/socle/libffi.sh
+RUN /build/lib/run-recipe.sh libffi
+COPY recipes/socle/pcre2.sh /build/recipes/socle/pcre2.sh
+RUN /build/lib/run-recipe.sh pcre2
+COPY recipes/socle/libpng.sh /build/recipes/socle/libpng.sh
+RUN /build/lib/run-recipe.sh libpng
+COPY recipes/socle/pixman.sh /build/recipes/socle/pixman.sh
+RUN /build/lib/run-recipe.sh pixman
+COPY recipes/socle/libdrm.sh /build/recipes/socle/libdrm.sh
+RUN /build/lib/run-recipe.sh libdrm
+COPY recipes/socle/libseccomp.sh /build/recipes/socle/libseccomp.sh
+RUN /build/lib/run-recipe.sh libseccomp
+COPY recipes/socle/libmnl.sh /build/recipes/socle/libmnl.sh
+RUN /build/lib/run-recipe.sh libmnl
+COPY recipes/socle/popt.sh /build/recipes/socle/popt.sh
+RUN /build/lib/run-recipe.sh popt
+COPY recipes/socle/libfribidi.sh /build/recipes/socle/libfribidi.sh
+RUN /build/lib/run-recipe.sh libfribidi
+
+# --- pass 3: tools ----------------------------------------------------------
+# The system tools and the libraries they bring. mount/umount stay with busybox;
+# blkid and the *libblkid/libmount/libuuid* libraries come from util-linux.
+FROM socle AS tools
+COPY board /build/board
+COPY recipes/tools/util-linux.sh /build/recipes/tools/util-linux.sh
+RUN /build/lib/run-recipe.sh util-linux
+COPY recipes/tools/libnftnl.sh /build/recipes/tools/libnftnl.sh
+RUN /build/lib/run-recipe.sh libnftnl
+COPY recipes/tools/iptables.sh /build/recipes/tools/iptables.sh
+RUN /build/lib/run-recipe.sh iptables
+COPY recipes/tools/kmod.sh /build/recipes/tools/kmod.sh
+RUN /build/lib/run-recipe.sh kmod
+COPY recipes/tools/e2fsprogs.sh /build/recipes/tools/e2fsprogs.sh
+RUN /build/lib/run-recipe.sh e2fsprogs
+COPY recipes/tools/gptfdisk.sh /build/recipes/tools/gptfdisk.sh
+RUN /build/lib/run-recipe.sh gptfdisk
+COPY recipes/tools/iproute2.sh /build/recipes/tools/iproute2.sh
+RUN /build/lib/run-recipe.sh iproute2
+COPY recipes/tools/kbd.sh /build/recipes/tools/kbd.sh
+RUN /build/lib/run-recipe.sh kbd
+COPY recipes/tools/busybox.sh /build/recipes/tools/busybox.sh
+RUN /build/lib/run-recipe.sh busybox
+
+# --- pass 4: console --------------------------------------------------------
+# The cairo + DRM console's stack. A chain, not a fan: freetype -> fontconfig ->
+# glib -> cairo -> harfbuzz -> pango. It needs the socle (libpng, pixman) and
+# util-linux's libmount (from the tools pass).
+FROM tools AS console
+COPY recipes/console/freetype.sh /build/recipes/console/freetype.sh
+RUN /build/lib/run-recipe.sh freetype
+COPY recipes/console/fontconfig.sh /build/recipes/console/fontconfig.sh
+RUN /build/lib/run-recipe.sh fontconfig
+COPY recipes/console/libglib2.sh /build/recipes/console/libglib2.sh
+RUN /build/lib/run-recipe.sh libglib2
+COPY recipes/console/cairo.sh /build/recipes/console/cairo.sh
+RUN /build/lib/run-recipe.sh cairo
+COPY recipes/console/harfbuzz.sh /build/recipes/console/harfbuzz.sh
+RUN /build/lib/run-recipe.sh harfbuzz
+COPY recipes/console/pango.sh /build/recipes/console/pango.sh
+RUN /build/lib/run-recipe.sh pango
+COPY recipes/console/dejavu.sh /build/recipes/console/dejavu.sh
+RUN /build/lib/run-recipe.sh dejavu
+
+# --- pass 1: kernel ---------------------------------------------------------
+# Independent of the userspace: builds from the libc stage (which only needs the
+# builder's tools and the kernel headers it already installed) and meets the
+# rest at assembly.
+FROM libc AS kernel
+COPY board/kernel.fragment /build/board/kernel.fragment
+COPY recipes/kernel/linux.sh /build/recipes/kernel/linux.sh
+RUN /build/lib/run-recipe.sh linux
+
+# --- the vates binaries and the Xen guest agent (Go) ------------------------
+# Built inside the build: vates from the sources in context/src, the Xen agent
+# from the pinned XCP-ng source. GOTOOLCHAIN=local keeps Go from fetching a newer
+# toolchain than the base ships.
+FROM ${BASE} AS go-base
+RUN set -eux; \
+	dnf -y --setopt=install_weak_deps=False install golang git ca-certificates; \
+	dnf clean all
+ENV GOTOOLCHAIN=local
+
+FROM go-base AS vates
+COPY context/src /src
+RUN set -eux; mkdir -p /out/bin; \
+	for c in vates-sysinit vates-console vates-api vates-kubelet-run vates-launcher; do \
+		CGO_ENABLED=0 go build -C /src -trimpath -ldflags '-s -w' -o /out/bin/$c ./cmd/$c; \
+	done
+
+FROM go-base AS xe
+ARG XE_URL=https://github.com/xcp-ng/xe-guest-utilities/archive/abf2ba46d5d2b91750bbc49d2cc54c6f2d2206f7.tar.gz
+ARG XE_SHA256=c107cae221b0991aeb622adeeb2a3f3554def2b695b985e25bc87b68bdfa5813
+RUN set -eux; \
+	curl -fL --retry 3 -o /tmp/xe.tar.gz "${XE_URL}"; \
+	echo "${XE_SHA256}  /tmp/xe.tar.gz" | sha256sum -c -; \
+	mkdir -p /xe /out; \
+	tar -xf /tmp/xe.tar.gz -C /xe --strip-components=1; \
+	sed -i \
+		-e 's/@PRODUCT_MAJOR_VERSION@/7/g' \
+		-e 's/@PRODUCT_MINOR_VERSION@/30/g' \
+		-e 's/@PRODUCT_MICRO_VERSION@/0/g' \
+		-e 's/@NUMERIC_BUILD_NUMBER@/0/g' \
+		/xe/guestmetric/guestmetric_linux.go; \
+	CGO_ENABLED=0 go build -C /xe -trimpath -ldflags '-s -w' -o /out/xe-daemon ./xe-daemon; \
+	install -m 0755 /xe/mk/xe-linux-distribution /out/xe-linux-distribution
+
+# --- pass 5: container runtime ----------------------------------------------
+# containerd, runc and the CNI plugins, from upstream release artifacts. Only
+# what Kubernetes needs to run: the kubelet image, built in the disk stage, is
+# imported into containerd at first boot.
+FROM console AS runtime
+# The Mozilla CA bundle, pinned by sha. containerd pulls the Kubernetes images
+# over TLS and the launcher fetches binaries over TLS; without it both fail with
+# "x509: certificate signed by unknown authority").
+ARG CA_URL=https://curl.se/ca/cacert.pem
+ARG CA_SHA256=a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505
+RUN set -eux; \
+	mkdir -p /sysroot/etc/ssl/certs; \
+	curl -fL --retry 3 -o /sysroot/etc/ssl/certs/ca-certificates.crt "${CA_URL}"; \
+	echo "${CA_SHA256}  /sysroot/etc/ssl/certs/ca-certificates.crt" | sha256sum -c -
+COPY recipes/runtime/containerd.sh /build/recipes/runtime/containerd.sh
+RUN /build/lib/run-recipe.sh containerd
+COPY recipes/runtime/runc.sh /build/recipes/runtime/runc.sh
+RUN /build/lib/run-recipe.sh runc
+COPY recipes/runtime/cni.sh /build/recipes/runtime/cni.sh
+RUN /build/lib/run-recipe.sh cni
+
+# --- pass 6: assemble -------------------------------------------------------
+# Merge the userspace (runtime), the kernel (bzImage + modules) and the image's
+# own content (context/), and stage everything the disk assembly needs. The
+# assembly itself is NOT run here -- build.sh runs it at container-run time,
+# against a bind-mounted build/out (see the bottom of this stage). genimage and
+# its libconfuse are built here as host tools, from upstream sources.
+FROM runtime AS disk
+# systemd-boot is built from this source. The pin lives here, not in pins.conf,
+# so adding it does not invalidate the (expensive) libc layer; the URL is the
+# tag archive systemd publishes as source (GitHub regenerates it, so the sha is
+# of the archive as fetched).
+ARG SYSTEMD_VERSION=258.7
+ARG SYSTEMD_URL=https://github.com/systemd/systemd/archive/refs/tags/v258.7.tar.gz
+ARG SYSTEMD_SHA256=6bd311c25f00d634ae3b4544d582e27df0d4166e6ba3d403b18b3129d7f44cae
+RUN set -eux; \
+	dnf -y --setopt=install_weak_deps=False install \
+		mtools dosfstools e2fsprogs gnu-efi-devel python3-pyelftools python3-jinja2 libcap-devel; \
+	dnf clean all
+COPY --from=kernel /sysroot/boot /sysroot/boot
+COPY --from=kernel /sysroot/lib/modules /sysroot/lib/modules
+COPY recipes/host/systemd-boot.sh /build/recipes/host/systemd-boot.sh
+RUN /build/lib/run-recipe.sh systemd-boot
+COPY --from=vates /out/bin /build/vates-bin
+COPY --from=xe /out /build/xe
+COPY lib/build-kubelet-image.sh /build/lib/build-kubelet-image.sh
+RUN bash /build/lib/build-kubelet-image.sh
+COPY genimage.cfg /build/genimage.cfg
+COPY context /build/context
+COPY recipes/host/libconfuse.sh /build/recipes/host/libconfuse.sh
+RUN /build/lib/run-recipe.sh libconfuse
+COPY recipes/host/genimage.sh /build/recipes/host/genimage.sh
+RUN /build/lib/run-recipe.sh genimage
+COPY lib/assemble.sh /build/lib/assemble.sh
+COPY lib/trim.sh /build/lib/trim.sh
+# The assembly is deliberately NOT a RUN. A RUN would commit the disk --
+# rootfs.ext4, the ESP, vates.img, several GiB -- into this image, turning it
+# into a result rather than the assembler it is, and build.sh would then have to
+# start a throwaway container and copy the files back out. This stage carries
+# the tools and the inputs; build.sh runs assemble.sh against a bind-mounted
+# build/out, so the disk is written straight to the host and never enters an
+# image layer.

@@ -1,0 +1,17 @@
+{
+  // markdownlint-cli2 configuration for this repository.
+  //
+  // Two rules are disabled deliberately, and both for the same reason: the
+  // documentation is built around measurement tables, and the rules fight them.
+  "config": {
+    // MD013 line-length: a table cell cannot be wrapped without destroying the
+    // table, and several of them carry long measurement strings on purpose. The
+    // prose beside them is wrapped by hand, not to a hard column, so enforcing
+    // 80 would flag the tables and a handful of 81-character prose lines.
+    "MD013": false,
+
+    // MD060 table-column-style: a recent, purely stylistic rule about the spaces
+    // around table pipes. The tables here are hand-aligned and predate it.
+    "MD060": false
+  }
+}

@@ -1,0 +1,41 @@
+# The document `kubeadm join` reads, for a control plane joining an existing
+# cluster.
+#
+# It differs from the init document in what it does NOT contain: no
+# kubernetesVersion, no controlPlaneEndpoint as a thing to create, and no
+# networking. A joining node does not decide any of those -- the cluster already
+# did. It discovers them, and this file says only how to reach the cluster and
+# how to identify itself within it.
+apiVersion: {{.APIVersion}}
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    # The VIP, not this node's address: discovery is a question asked of the
+    # cluster, and the cluster is reachable at its endpoint.
+    apiServerEndpoint: {{.ControlPlaneEndpoint}}
+    token: {{.Token}}
+    # Where to find the CA certificate hash. kubeadm accepts a file, and the
+    # bootstrap node writes the hash there when it creates the token, so the
+    # joining node verifies it is talking to the right cluster rather than
+    # trusting whatever answers on the endpoint.
+    caCertHashes:
+    - sha256:{{.CACertHash}}
+controlPlane:
+  localAPIEndpoint:
+    advertiseAddress: {{.NodeIP}}
+    bindPort: 6443
+{{- if .CertificateKey}}
+  # Fetches the certificate authorities and certificates from the cluster.
+  #
+  # Under controlPlane, NOT under discovery: kubeadm decodes strictly, and
+  # discovery.bootstrapToken.certificateKey is rejected as an unknown field --
+  # with a warning the run then carries on past, so the mistake surfaces later as
+  # a join that never completes rather than as a rejected document.
+  #
+  # Absent when the joining node was given the PKI on its config drive instead:
+  # there is then nothing to fetch, and an empty key is not the same as no key.
+  certificateKey: {{.CertificateKey}}
+{{- end}}
+nodeRegistration:
+  name: {{.NodeName}}
+  criSocket: {{.CRIEndpoint}}

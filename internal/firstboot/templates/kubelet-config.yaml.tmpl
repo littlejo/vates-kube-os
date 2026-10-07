@@ -1,0 +1,44 @@
+# The KubeletConfiguration passed to the kubelet through --config.
+#
+# Two keys older Kubernetes accepted are deliberately absent:
+#
+#   hostnameOverride   removed in v1.31. Present, strict decoding fails with
+#                      "unknown field" and the kubelet then falls back to lenient
+#                      decoding and silently DROPS it -- a configuration that
+#                      appears applied and is not. The kubelet unit passes
+#                      --hostname-override as a flag instead.
+#
+# clusterDNS is HERE, and it is not optional. The kubelet does not read the
+# cluster's DNS address from the cluster: kubeadm writes it into this file during
+# `kubeadm init`, and this system installs the file itself. Without the key the
+# kubelet cannot honour the ClusterFirst policy that nearly every pod uses, and
+# falls back to the node's resolver:
+#   kubelet does not have ClusterDNS IP configured and cannot create Pod using
+#   "ClusterFirst" policy. Falling back to "Default" policy.
+# The pods stay 1/1 Running and no Service name resolves -- measured, with curl
+# reporting "Could not resolve host".
+#
+# The API server credentials are absent too. In v1.31
+# authentication.webhook.kubeConfigFile and authorization.webhook.* no longer
+# exist in this type; the kubelet takes the kubeconfig through the --kubeconfig
+# flag. Without that flag it starts in "Standalone mode, no API client" and dies
+# with "no client provided, cannot use webhook authentication".
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: {{.CgroupDriver}}
+containerRuntimeEndpoint: {{.CRIEndpoint}}
+clusterDNS:
+  - {{.ClusterDNS}}
+clusterDomain: {{.DNSDomain}}
+# Where the kubelet looks for static pods. NOT a kubelet default: the
+# --pod-manifest-path flag has no default value, and it is kubeadm that normally
+# writes this key into the kubelet's configuration. Without it the kubelet runs,
+# reports healthy, and starts nothing -- no etcd, no API server, no VIP -- while
+# saying nothing about the directory it never looked at.
+staticPodPath: /etc/kubernetes/manifests
+kubeReserved:
+  cpu: "100m"
+  memory: "128Mi"
+systemReserved:
+  cpu: "100m"
+  memory: "128Mi"

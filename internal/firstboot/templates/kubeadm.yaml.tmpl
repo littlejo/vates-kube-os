@@ -1,0 +1,29 @@
+apiVersion: {{.APIVersion}}
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: {{.NodeIP}}
+  bindPort: 6443
+nodeRegistration:
+  name: {{.NodeName}}
+  criSocket: {{.CRIEndpoint}}
+---
+apiVersion: {{.APIVersion}}
+kind: ClusterConfiguration
+kubernetesVersion: {{.KubernetesVersion}}
+controlPlaneEndpoint: {{.ControlPlaneEndpoint}}
+networking:
+  podSubnet: {{.PodSubnet}}
+  serviceSubnet: {{.ServiceSubnet}}
+  dnsDomain: {{.DNSDomain}}
+{{- if .ImageRepository}}
+imageRepository: {{.ImageRepository}}
+etcd:
+  local:
+    imageRepository: {{.ImageRepository}}
+dns:
+  imageRepository: {{.ImageRepository}}
+{{- end}}
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd

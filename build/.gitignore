@@ -1,0 +1,13 @@
+# Source tarballs fetched here from the pinned upstream URLs (build.sh).
+dl/
+# The image's own content staged for assembly (build.sh).
+context/
+# The build log this script tees to (./build.sh follow).
+build.log
+# The single-build lock build.sh takes (flock).
+.build.lock
+# Exported disk artifacts.
+out/
+# The Go module/build cache test/cluster.sh uses when it builds vateskctl in a
+# container, so the module download is paid once.
+go-cache/

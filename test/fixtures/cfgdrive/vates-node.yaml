@@ -1,0 +1,43 @@
+# Vates Kube OS — node configuration (config drive payload)
+#
+# Mounted from a cidata/iso9660 labelled drive and parsed by vates-init at first
+# boot. The same schema is defined in vatescfg and is imported by
+# cluster-api-provider-vates, so unknown keys are rejected rather than ignored.
+#
+# TEST FIXTURE. This is a worker told to join a cluster that does not exist, so
+# it can never reach its endpoint: the console is expected to show
+# "Configured / Waiting for API", and the kubelet logs "no route to host".
+# test/cluster.sh writes its own drive, with the control plane VIP as the
+# endpoint, and THAT one forms a real cluster.
+
+# master = control plane (kubelet + etcd, apiserver, scheduler, controller-manager)
+# worker = kubelet only, joins an existing control plane
+role: worker
+
+# Kubernetes release to run. The OS image itself is version-agnostic; this
+# selects the kubelet and control plane container images.
+kubernetes:
+  version: v1.31.0
+
+cluster:
+  # host:port of the API server load balancer (managed outside this OS).
+  #
+  # 192.0.2.10 is an RFC 5737 documentation address (TEST-NET-1): it is not a
+  # real host. It is a placeholder precisely so that it cannot be mistaken for
+  # one. A node pointed here can never join, which is expected for a fixture.
+  controlPlaneEndpoint: "192.0.2.10:6443"
+  # bootstrap token used by kubeadm to join the cluster
+  token: "abcdef.0123456789abcdef"
+
+network:
+  # predictable interface names are off in this image: the first NIC is eth0
+  iface: eth0
+  # dhcp | static
+  mode: dhcp
+  # only used when mode=static
+  cidr: "192.0.2.20/24"
+  gateway: "192.0.2.1"
+
+cni:
+  plugin: flannel
+  cidr: "10.244.0.0/16"

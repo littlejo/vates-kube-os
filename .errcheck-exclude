@@ -1,0 +1,18 @@
+// Functions errcheck should not report. One symbol per line, in errcheck's own
+// `(*pkg.Type).Method` form; lines starting with `//` are comments.
+//
+// Close reports the error of the last write, and by the time it runs there is
+// nothing the caller can usefully do with it: the stream is over. That is the
+// convention everywhere, and it is why the calls are `defer x.Close()` rather
+// than a checked error. errcheck does not accept a wildcard here, so each type
+// whose Close we call is named. Add a line when a new one appears -- the point
+// is that the choice is written down, not that it is blanket.
+(*os.File).Close
+(net.Conn).Close
+(net.Listener).Close
+(*google.golang.org/grpc.ClientConn).Close
+
+// Writing to an http.ResponseWriter, or to a ResponseWriter test double: the
+// error belongs to the handler and is already surfaced by the server. The
+// handler has no better place to put it.
+(net/http.ResponseWriter).Write

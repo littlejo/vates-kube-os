@@ -1,0 +1,17 @@
+# The node's NTP client.
+#
+# busybox already ships one -- ntpd -- and it needs a new package for nothing:
+# no system user, no state directory, no init script, no configuration file
+# beyond the "server HOST" lines vates-init writes from time.servers. The system
+# runs in UTC, so there is no timezone to keep.
+#
+# chrony was tried first and refused: it declares a system user, and a build
+# that has to create one pulls in host-mkpasswd and host-libxcrypt, whose
+# configure does not run on this build host (its Perl lacks the core "open"
+# pragma).
+#
+# FEATURE_NTPD_CONF is what makes ntpd read /etc/ntp.conf with no -p on the
+# command line; it is the default when ntpd is on, and set explicitly so a change
+# of that default cannot silently drop the peers.
+CONFIG_NTPD=y
+CONFIG_FEATURE_NTPD_CONF=y

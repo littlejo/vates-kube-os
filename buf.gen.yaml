@@ -1,0 +1,11 @@
+version: v2
+# The generated code is committed (see proto/vates/api/v1/*.pb.go) so that the
+# image build never needs buf or protoc: `go build` on the host is enough, the
+# same way it is for the rest of the tree.
+plugins:
+  - local: protoc-gen-go
+    out: proto
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: proto
+    opt: paths=source_relative

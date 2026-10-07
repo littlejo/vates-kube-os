@@ -1,0 +1,46 @@
+#!/bin/sh
+# Vates Kube OS DHCP client handler, run by busybox udhcpc on every lease event.
+#
+# busybox's udhcpc is the node's only DHCP client: it asks for a lease and then
+# runs this script to APPLY it. Without a script it obtains the lease and
+# configures nothing -- the interface keeps no address, and PID 1's firstboot
+# waits forever for one ("waiting for an IPv4 address on eth0"), which is a node
+# stuck in configure.
+#
+# It applies the address with busybox ifconfig/route and mirrors the resolvers
+# into /etc/resolv.conf, which is a symlink onto /run (the root is read-only).
+#
+# The lease values used below -- ip, router, dns -- are exported by busybox
+# udhcpc when it runs this script; they are not assigned here.
+# shellcheck disable=SC2154
+set -u
+
+RESOLV_CONF=/etc/resolv.conf
+iface="${interface:-eth0}"
+subnet="${subnet:-255.255.255.0}"
+
+case "${1:-}" in
+deconfig)
+	ifconfig "${iface}" 0.0.0.0 2>/dev/null || true
+	: >"${RESOLV_CONF}" 2>/dev/null || true
+	;;
+bound | renew)
+	if [ -n "${broadcast:-}" ]; then
+		ifconfig "${iface}" "${ip}" netmask "${subnet}" broadcast "${broadcast}" up
+	else
+		ifconfig "${iface}" "${ip}" netmask "${subnet}" up
+	fi
+	if [ -n "${router:-}" ]; then
+		route del default dev "${iface}" 2>/dev/null || true
+		route add default gw "${router}" dev "${iface}" 2>/dev/null || true
+	fi
+	if [ -n "${dns:-}" ]; then
+		: >"${RESOLV_CONF}" 2>/dev/null || true
+		for d in ${dns}; do
+			echo "nameserver ${d}" >>"${RESOLV_CONF}" 2>/dev/null || true
+		done
+	fi
+	;;
+esac
+
+exit 0

@@ -1,0 +1,10 @@
+# containerd configuration for the vates node.
+#
+# The kubelet is a container under containerd, so containerd owns the image
+# store. Nothing exotic: the defaults, with the CRI plugin on.
+version = 3
+
+[plugins."io.containerd.cri.v1.runtime"]
+  enable_selinux = false
+  enable_unprivileged_ports = true
+  enable_unprivileged_icmp = true

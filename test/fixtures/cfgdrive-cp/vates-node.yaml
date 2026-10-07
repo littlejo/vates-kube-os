@@ -1,0 +1,25 @@
+# Vates Kube OS — control plane node, for the single-node boot test.
+#
+# 192.168.122.210 is on the libvirt default network, which the VMs run on.
+#
+# It is inside libvirt's DHCP pool (192.168.122.2 to .254), so nothing prevents a
+# node from being handed that address and colliding with the VIP. Shrinking the
+# pool is the clean fix and was deliberately not done; if a collision appears,
+# this is the line to change.
+role: master
+
+kubernetes:
+  version: v1.31.0
+
+cluster:
+  controlPlaneEndpoint: "192.168.122.210:6443"
+  vip:
+    address: "192.168.122.210"
+
+network:
+  iface: eth0
+  mode: dhcp
+
+cni:
+  plugin: flannel
+  cidr: "10.244.0.0/16"

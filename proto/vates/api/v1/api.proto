@@ -1,0 +1,117 @@
+// The Vates Kube OS management API.
+//
+// One service, a handful of methods, authenticated with mutual TLS: the cluster
+// certificate authority signs the server certificate and every client
+// certificate an operator (vateskctl) or the CAPI provider presents. This is the
+// node's management face, and it is what replaces SSH -- which this OS does not
+// carry. See docs/API.md.
+syntax = "proto3";
+
+package vates.api.v1;
+
+option go_package = "github.com/vatesfr/vates-kube-os/proto/vates/api/v1;apiv1";
+
+// VatesAPI is served on port 50000 by a running node.
+service VatesAPI {
+  // GetStatus reports what the node is and how far its bring-up has come. It is
+  // the call a provider polls to know a machine is ready.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  // GetKubeconfig returns the admin kubeconfig of the cluster the node belongs
+  // to. A control plane reads it from its own disk; the provider stores it so
+  // `clusterctl get kubeconfig` can hand it out.
+  rpc GetKubeconfig(GetKubeconfigRequest) returns (GetKubeconfigResponse);
+
+  // GetJoinMaterial returns fresh credentials for a machine that joins this
+  // cluster: a bootstrap token, the certificate key a joining control plane
+  // fetches the shared certificates with, and the CA hash it verifies the
+  // cluster with.
+  //
+  // Only a bootstrapped control plane can answer. Under CAPI the provider holds
+  // the cluster CA and issues these itself, so it does not call this; without
+  // CAPI the node is the only holder, and this API is the only channel -- which
+  // is the whole reason it exists.
+  rpc GetJoinMaterial(GetJoinMaterialRequest) returns (GetJoinMaterialResponse);
+
+  // GetBootSlots reports the A/B state: which root the node is running, and
+  // which boot entry loader.conf points at. The two roots are the disk's rootA
+  // and rootB; see docs/IMMUTABILITY.md.
+  rpc GetBootSlots(GetBootSlotsRequest) returns (GetBootSlotsResponse);
+
+  // SetBootSlot points the NEXT boot at a slot and marks its entry a trial, so a
+  // slot that does not come up is rolled back from automatically. It does NOT
+  // write the slot: the caller -- the provider, or an operator with an image --
+  // has done that, or the node would boot the old system again. This is the only
+  // way to switch, because the node has no shell.
+  rpc SetBootSlot(SetBootSlotRequest) returns (SetBootSlotResponse);
+
+  // GetLogs returns the tail of the node's own logs -- PID 1's and each
+  // supervised service's. A node has no shell and no sshd, so when bring-up
+  // fails this is the only place an operator can see WHY, and it answers even
+  // when the node never became Ready.
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  // The node's Kubernetes name.
+  string node_name = 1;
+  // Whether this node runs a control plane.
+  bool control_plane = 2;
+  // The Kubernetes version the node was told to run.
+  string kubernetes_version = 3;
+  // The cluster's API endpoint, host:port.
+  string cluster_endpoint = 4;
+  // Whether the kubelet has registered the node and the API answers.
+  bool ready = 5;
+}
+
+message GetKubeconfigRequest {}
+
+message GetKubeconfigResponse {
+  // A kubeconfig file, ready to write to disk and pass to `kubectl --kubeconfig`.
+  bytes kubeconfig = 1;
+}
+
+message GetJoinMaterialRequest {}
+
+message GetJoinMaterialResponse {
+  // A bootstrap token, "abcdef.0123456789abcdef", valid for 24 hours.
+  string token = 1;
+  // The certificate key a joining control plane passes to `kubeadm join
+  // --control-plane --certificate-key`. Valid for two hours, kubeadm's rule.
+  string certificate_key = 2;
+  // The cluster CA's public-key hash, for kubeadm's
+  // --discovery-token-ca-cert-hash.
+  string ca_cert_hash = 3;
+}
+
+message GetBootSlotsRequest {}
+
+message GetBootSlotsResponse {
+  // The slot the node is running: "a", "b", or "" when the kernel command line
+  // does not name one.
+  string running = 1;
+  // The boot entry loader.conf defaults to, boot counter included ("vates-b+3").
+  string default_entry = 2;
+  // Each slot's entry base name on the ESP ("vates-a", "vates-b+3"), by slot.
+  map<string, string> entries = 3;
+}
+
+message SetBootSlotRequest {
+  // The slot to boot next: "a" or "b".
+  string slot = 1;
+}
+
+message SetBootSlotResponse {}
+
+message GetLogsRequest {
+  // How many lines to return per log, from the end. Zero means a default (200).
+  int32 lines = 1;
+}
+
+message GetLogsResponse {
+  // The logs, each section headed by the file it came from, oldest line first.
+  string logs = 1;
+}
