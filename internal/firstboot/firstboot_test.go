@@ -1177,11 +1177,116 @@ func TestJoinDocumentUsesOnlyKnownFields(t *testing.T) {
 			Name      string `yaml:"name"`
 			CRISocket string `yaml:"criSocket"`
 		} `yaml:"nodeRegistration"`
+		Patches struct {
+			Directory string `yaml:"directory"`
+		} `yaml:"patches"`
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	if err := dec.Decode(&join); err != nil {
 		t.Fatalf("kubeadm would reject or ignore part of this document: %v\n%s", err, raw)
+	}
+}
+
+func TestKubeadmPatchesPointTheLivenessProbeAwayFromEtcd(t *testing.T) {
+	// A slow etcd must not restart the API server: /livez includes the etcd
+	// check, and a control plane killed for a slow disk is a control plane lost
+	// while etcd is already struggling. The patch is what moves the liveness
+	// probe off etcd, and it has to reach BOTH documents -- a joining control
+	// plane's kubeadm reads its own patches.directory.
+	tests := []struct {
+		name   string
+		render func() ([]byte, error)
+	}{
+		{
+			name: "bootstrapping control plane (init)",
+			render: func() ([]byte, error) {
+				return KubeadmConfig(loadConfig(t, masterDoc), "vates-cp-1", "192.168.122.50")
+			},
+		},
+		{
+			name: "joining control plane (join)",
+			render: func() ([]byte, error) {
+				return JoinConfiguration(loadConfig(t, joiningMasterDoc), "vates-cp-2", "192.168.122.51")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := tt.render()
+			if err != nil {
+				t.Fatalf("rendering failed: %v", err)
+			}
+			var doc struct {
+				Patches struct {
+					Directory string `yaml:"directory"`
+				} `yaml:"patches"`
+			}
+			if err := yaml.Unmarshal(raw, &doc); err != nil {
+				t.Fatalf("document does not parse: %v", err)
+			}
+			if doc.Patches.Directory != PatchesDir {
+				t.Errorf("patches.directory = %q, want %q", doc.Patches.Directory, PatchesDir)
+			}
+		})
+	}
+
+	// The patch file itself: kubeadm applies it to the kube-apiserver static
+	// pod, so it must name that component and move ONLY the liveness probe.
+	var pod struct {
+		Kind     string `yaml:"kind"`
+		Metadata struct {
+			Name      string `yaml:"name"`
+			Namespace string `yaml:"namespace"`
+		} `yaml:"metadata"`
+		Spec struct {
+			Containers []struct {
+				Name          string `yaml:"name"`
+				LivenessProbe struct {
+					HTTPGet struct {
+						Path string `yaml:"path"`
+					} `yaml:"httpGet"`
+				} `yaml:"livenessProbe"`
+				ReadinessProbe *struct{} `yaml:"readinessProbe"`
+			} `yaml:"containers"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(KubeAPIServerLivenessPatch(), &pod); err != nil {
+		t.Fatalf("the kube-apiserver patch does not parse: %v", err)
+	}
+	if pod.Kind != "Pod" || pod.Metadata.Name != "kube-apiserver" || pod.Metadata.Namespace != "kube-system" {
+		t.Errorf("patch identifies %s/%s (%s), want kube-apiserver in kube-system as a Pod",
+			pod.Metadata.Namespace, pod.Metadata.Name, pod.Kind)
+	}
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("patch has %d containers, want 1", len(pod.Spec.Containers))
+	}
+	c := pod.Spec.Containers[0]
+	if c.Name != "kube-apiserver" {
+		t.Errorf("patched container = %q, want kube-apiserver", c.Name)
+	}
+	if got := c.LivenessProbe.HTTPGet.Path; got != "/livez?exclude=etcd" {
+		t.Errorf("liveness path = %q, want /livez?exclude=etcd", got)
+	}
+	// Readiness keeps the etcd check: an API server that cannot read etcd
+	// should leave its Service endpoints. Only the liveness probe changes.
+	if c.ReadinessProbe != nil {
+		t.Error("the patch touches readinessProbe; only the liveness probe must drop etcd")
+	}
+
+	// And the patch must actually be installed, at the path the documents name.
+	paths := testPaths(t)
+	files, err := MasterFiles(loadConfig(t, masterDoc), bareDrive(t, masterDoc), paths, "vates-cp-1", "192.168.122.50")
+	if err != nil {
+		t.Fatalf("MasterFiles() failed: %v", err)
+	}
+	f, ok := findFile(files, filepath.Join(PatchesDir, kubeAPIServerLivenessPatchName))
+	if !ok {
+		t.Fatalf("MasterFiles() did not install the patch at %s/%s", PatchesDir, kubeAPIServerLivenessPatchName)
+	}
+	if string(f.Content) != string(KubeAPIServerLivenessPatch()) {
+		t.Error("the installed patch differs from KubeAPIServerLivenessPatch()")
 	}
 }
 

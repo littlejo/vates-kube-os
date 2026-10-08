@@ -39,6 +39,50 @@ const KubeadmConfigPath = "/etc/kubernetes/kubeadm.yaml"
 // pod manifest, so it must exist before the kubelet starts that pod.
 const EtcdDataDir = "/var/lib/etcd"
 
+// PatchesDir is where kubeadm looks for the patch files named by
+// `patches.directory` in the init and join documents. vates-init writes it
+// before any kubeadm command runs, for both the bootstrapping phase list and
+// the join.
+const PatchesDir = "/etc/kubernetes/patches"
+
+// kubeAPIServerLivenessPatchName is the patch file's name, in kubeadm's
+// convention `<target>+<patchtype>.<extension>`: the kube-apiserver static pod,
+// applied as a strategic merge.
+const kubeAPIServerLivenessPatchName = "kube-apiserver+strategic.yaml"
+
+// KubeAPIServerLivenessPatch keeps etcd out of the API server's LIVENESS probe.
+//
+// kubeadm's default liveness probe is /livez, and /livez includes the etcd
+// check. That couples the process's survival to etcd's latency: a slow etcd --
+// a shared NFS SR, an overloaded disk -- makes /livez answer 500, and if it
+// stays down past the probe's failureThreshold the kubelet RESTARTS the API
+// server. That is the one thing that cannot help: the API server is not what is
+// slow, and killing it removes a control plane from the cluster while etcd is
+// already struggling. Measured on a three-control-plane demo whose disks were
+// on NFS: the etcd leader logged "leader is overloaded likely from slow disk"
+// and all three API servers answered 500 to the probe within the same second.
+//
+// /livez?exclude=etcd keeps the check on the API server's own health and drops
+// the etcd dependency. READINESS still includes etcd, which is right: an API
+// server that cannot read etcd should leave its Service endpoints. Only the
+// probe that RESTARTS the process stops consulting etcd.
+func KubeAPIServerLivenessPatch() []byte {
+	return []byte(`# Written by vates-init. See KubeAPIServerLivenessPatch for why the liveness
+# probe drops the etcd check that kubeadm's default /livez carries.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-apiserver
+  namespace: kube-system
+spec:
+  containers:
+  - name: kube-apiserver
+    livenessProbe:
+      httpGet:
+        path: /livez?exclude=etcd
+`)
+}
+
 // RequiredDirs are the host directories that must exist before the kubelet is
 // started, for either role.
 //
@@ -218,6 +262,17 @@ func MasterFiles(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, no
 			Content: m,
 		})
 	}
+
+	// The API server's liveness probe must not depend on etcd, and kubeadm's
+	// default one does. The patch is written for BOTH join paths: a joining
+	// control plane's kubeadm join reads it from the join document's
+	// patches.directory, exactly as the bootstrapping phases read it from the
+	// init document's.
+	files = append(files, File{
+		Path:    filepath.Join(PatchesDir, kubeAPIServerLivenessPatchName),
+		Mode:    0o644,
+		Content: KubeAPIServerLivenessPatch(),
+	})
 
 	return files, nil
 }

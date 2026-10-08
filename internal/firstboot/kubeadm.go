@@ -36,6 +36,9 @@ func KubeadmConfig(cfg *vatescfg.Config, nodeName, nodeIP string) ([]byte, error
 		PodSubnet            string
 		ServiceSubnet        string
 		DNSDomain            string
+		// PatchesDir is where kubeadm reads the patch that keeps etcd out of
+		// the API server's liveness probe. See KubeAPIServerLivenessPatch.
+		PatchesDir string
 		// ImageRepository is empty unless a mirror is configured, and empty
 		// means "do not mention it": kubeadm's own defaults are then used, which
 		// is what a cluster with internet access needs.
@@ -53,6 +56,7 @@ func KubeadmConfig(cfg *vatescfg.Config, nodeName, nodeIP string) ([]byte, error
 		// and agreement by two independent defaults is not agreement.
 		ServiceSubnet: cfg.Cluster.ServiceCIDR,
 		DNSDomain:     cfg.Cluster.DNSDomain,
+		PatchesDir:    PatchesDir,
 		// Emitting all three of imageRepository, etcd and dns is deliberate.
 		// kubeadm's own defaults put CoreDNS under {repository}/coredns/coredns
 		// and etcd directly under the registry, so setting imageRepository alone

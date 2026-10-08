@@ -146,6 +146,7 @@ func JoinConfiguration(cfg *vatescfg.Config, nodeName, nodeIP string) ([]byte, e
 		Token                string
 		CACertHash           string
 		CertificateKey       string
+		PatchesDir           string
 	}{
 		APIVersion:           KubeadmAPIVersion,
 		NodeIP:               nodeIP,
@@ -155,6 +156,7 @@ func JoinConfiguration(cfg *vatescfg.Config, nodeName, nodeIP string) ([]byte, e
 		Token:                cfg.Cluster.Token,
 		CACertHash:           cfg.Cluster.CACertHash,
 		CertificateKey:       cfg.Cluster.CertificateKey,
+		PatchesDir:           PatchesDir,
 	})
 }
 

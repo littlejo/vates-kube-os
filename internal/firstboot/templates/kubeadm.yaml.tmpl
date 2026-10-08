@@ -6,6 +6,11 @@ localAPIEndpoint:
 nodeRegistration:
   name: {{.NodeName}}
   criSocket: {{.CRIEndpoint}}
+patches:
+  # Applied to the static pod manifests kubeadm generates; see
+  # KubeAPIServerLivenessPatch. Without it the API server's liveness probe
+  # carries kubeadm's default /livez, which depends on etcd.
+  directory: {{.PatchesDir}}
 ---
 apiVersion: {{.APIVersion}}
 kind: ClusterConfiguration
