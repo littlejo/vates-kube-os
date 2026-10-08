@@ -220,10 +220,26 @@ func (c *Client) get(path string, out any) error {
 	return nil
 }
 
+// cacheable marks a read as satisfied from the API server's watch cache.
+//
+// The console polls these reads every couple of seconds on EVERY node. A read
+// with no resourceVersion is a QUORUM read: the API server forwards it to etcd
+// and waits for a linearizable answer, so a fleet of consoles turns into a
+// steady stream of etcd round-trips -- which is exactly what starves a control
+// plane whose etcd sits on a slow disk. resourceVersion=0 asks for "any
+// version" instead: the answer comes from the watch cache, no etcd round-trip.
+//
+// The console shows a snapshot, so a few hundred milliseconds of staleness is
+// invisible and worth not hammering etcd for.
+func cacheable(q url.Values) url.Values {
+	q.Set("resourceVersion", "0")
+	return q
+}
+
 // Node reads one Node by name.
 func (c *Client) Node(name string) (Node, error) {
 	var n Node
-	err := c.get("/api/v1/nodes/"+url.PathEscape(name), &n)
+	err := c.get("/api/v1/nodes/"+url.PathEscape(name)+"?"+cacheable(url.Values{}).Encode(), &n)
 	return n, err
 }
 
@@ -234,7 +250,7 @@ func (c *Client) PodsOn(node string) ([]Pod, error) {
 	}
 	q := url.Values{}
 	q.Set("fieldSelector", "spec.nodeName="+node)
-	if err := c.get("/api/v1/pods?"+q.Encode(), &list); err != nil {
+	if err := c.get("/api/v1/pods?"+cacheable(q).Encode(), &list); err != nil {
 		return nil, err
 	}
 	sort.Slice(list.Items, func(i, j int) bool {
@@ -259,7 +275,7 @@ func (c *Client) Events(limit int) ([]Event, error) {
 	var list struct {
 		Items []Event `json:"items"`
 	}
-	if err := c.get("/api/v1/events?limit="+fmt.Sprint(limit), &list); err != nil {
+	if err := c.get("/api/v1/events?"+cacheable(url.Values{}).Encode()+"&limit="+fmt.Sprint(limit), &list); err != nil {
 		return nil, err
 	}
 	// The API returns events in no useful order for display; sort by time so the
