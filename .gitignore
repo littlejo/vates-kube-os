@@ -13,3 +13,6 @@
 
 # Developer notes (dense design documents, not for the public docs).
 /notes/
+
+# Local secrets and values (XO token, etc.)
+.env

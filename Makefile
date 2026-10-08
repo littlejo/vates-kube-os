@@ -26,11 +26,11 @@ K8S_VERSION ?= v1.31.0
 # only the CLI has an install story.
 PREFIX ?= $(HOME)/.local
 
-# `make template` imports this disk and turns it into a Xen Orchestra VM
-# template (the UUID the CAPI providers clone). XO_URL, XO_TOKEN, XO_POOL and
-# XO_SR come from the environment; see scripts/xo-template.sh.
-VHD ?= build/out/vates.vhd
-TEMPLATE_NAME ?= Vates Kube OS
+# `make template` imports the built disk and turns it into a Xen Orchestra VM
+# template (the UUID the CAPI providers clone). The values it needs (XO_URL,
+# XO_TOKEN, XO_POOL, XO_SR, NAME, VHD) come from a gitignored .env beside this
+# Makefile -- see scripts/xo-template.sh for the list -- and an environment
+# variable overrides the file, so `NAME=... make template` wins.
 
 help: ## Show this help
 	@printf '\nVates Kube OS\n\n'
@@ -58,9 +58,10 @@ image: ## Build the disk (podman: from-scratch userspace + genimage)
 # Turn the built disk into a Xen Orchestra VM template, replacing the previous
 # one of the same name. The CAPI providers clone a template, and building one by
 # hand (upload the VHD, create a VM, attach the disk, convert) is exactly what
-# this automates. It is a host-side deploy step, not part of the image.
-template: ## Create/replace the XO VM template (XO_URL, XO_TOKEN, XO_POOL, XO_SR)
-	VHD=$(VHD) NAME="$(TEMPLATE_NAME)" ./scripts/xo-template.sh
+# this automates. It is a host-side deploy step, not part of the image. Values
+# come from a gitignored .env; `NAME=... make template` overrides them.
+template: ## Create/replace the XO VM template (values from .env)
+	./scripts/xo-template.sh
 
 # The operator CLI is a host artifact, shipped alongside the images: it runs off
 # the node and is not part of the disk. It is a FILE target, not .PHONY, so make

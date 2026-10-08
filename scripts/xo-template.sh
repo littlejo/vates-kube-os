@@ -33,17 +33,43 @@
 # Prints the new template UUID on success.
 set -euo pipefail
 
-: "${XO_URL:?set XO_URL, e.g. https://xo.example.org}"
-: "${XO_TOKEN:?set XO_TOKEN to an XO authentication token}"
-: "${XO_POOL:?set XO_POOL to the pool UUID}"
-: "${XO_SR:?set XO_SR to the storage repository UUID}"
+say() { printf '  %s\n' "$*" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# Values for this XO, so they do not have to be typed or looked up: a gitignored
+# .env beside the Makefile. An explicit environment variable WINS over the file,
+# so `XO_SR=... make template` still overrides it.
+ENV_FILE="${ENV_FILE:-.env}"
+if [ -f "$ENV_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    [ "$key" = "$line" ] && continue                 # no '='
+    case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac # not a shell name
+    [ -n "${!key+x}" ] && continue                   # environment wins
+    val="${line#*=}"
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+    export "$key=$val"
+  done < "$ENV_FILE"
+  say "loaded $ENV_FILE"
+fi
+
+: "${XO_URL:?set XO_URL in $ENV_FILE or the environment}"
+: "${XO_TOKEN:?set XO_TOKEN in $ENV_FILE or the environment}"
+: "${XO_POOL:?set XO_POOL in $ENV_FILE or the environment}"
+: "${XO_SR:?set XO_SR in $ENV_FILE or the environment}"
 VHD="${VHD:-build/out/vates.vhd}"
 NAME="${NAME:-Vates Kube OS}"
 UEFI="${UEFI:-true}"
 BASE_TEMPLATE="${BASE_TEMPLATE:-}"
 
-say() { printf '  %s\n' "$*" >&2; }
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+if [ -n "${DRY_RUN:-}" ]; then
+  say "DRY_RUN: xo=$XO_URL pool=$XO_POOL sr=$XO_SR name='$NAME' vhd=$VHD uefi=$UEFI base=${BASE_TEMPLATE:-<auto>}"
+  exit 0
+fi
 
 [ -f "$VHD" ] || die "no disk at $VHD (build it first: make image)"
 
