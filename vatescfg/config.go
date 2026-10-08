@@ -464,12 +464,19 @@ const (
 // 1.30 node would be handed a document its kubeadm refuses, and the failure would
 // come from kubeadm rather than from here.
 //
-// Widening the range means writing and testing the templates the wider range
-// needs. That is the work CAPI's own bootstrap provider does for the versions it
-// supports, and no range can conjure it.
+// The upper bound is the last release whose kubeadm still accepts v1beta4 and
+// the documents below. v1beta4 was introduced in 1.31 and is still the current
+// kubeadm config API through 1.37; the documents use only fields that have not
+// moved (localAPIEndpoint, nodeRegistration's name and criSocket, networking, the
+// etcd/DNS imageRepository overrides, and a v1beta1 KubeletConfiguration), so
+// the range tracks kubeadm's API rather than our own code.
+//
+// Widening the range means (re)testing the templates the wider range needs. That
+// is the work CAPI's own bootstrap provider does for the versions it supports,
+// and no range can conjure it.
 const (
 	SupportedKubernetesMinorMin = 31
-	SupportedKubernetesMinorMax = 33
+	SupportedKubernetesMinorMax = 37
 )
 
 // KubernetesMinor extracts the minor number from a version like v1.31.4.

@@ -487,8 +487,8 @@ func TestKubernetesVersionMustBeInTheSupportedRange(t *testing.T) {
 	//
 	// A range and not a list: patch releases appear every few weeks, and a list
 	// would mean a new OS image for each one.
-	accept := []string{"v1.31.0", "v1.31.4", "v1.32.7", "v1.33.0"}
-	refuse := []string{"v1.30.9", "v1.34.0", "v1.29.0", "v1.40.1"}
+	accept := []string{"v1.31.0", "v1.31.4", "v1.32.7", "v1.33.0", "v1.34.0", "v1.35.6", "v1.36.0", "v1.37.1"}
+	refuse := []string{"v1.30.9", "v1.29.0", "v1.38.0", "v1.40.1"}
 
 	for _, v := range accept {
 		doc := strings.Replace(baseWorker, "version: v1.31.0", "version: "+v, 1)
