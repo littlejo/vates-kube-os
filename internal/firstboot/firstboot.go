@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/vatesfr/vates-kube-os/internal/configdrive"
@@ -288,12 +289,21 @@ func ctrBase(privileged bool) []string {
 
 // ctrContainerID names one run's container.
 //
-// Unique per process, so a kubeadm phase and a kubectl call -- which can be in
-// flight at the same time, from the configure and bootstrap units -- never
-// collide on a name. The id is not read by anything; it only has to be valid and
-// unused at the moment ctr creates it.
+// Unique per RUN, not per process: the management API answers GetJoinMaterial
+// from a single long-lived process, and it may answer several calls at once.
+// A per-process id would then be reused -- two concurrent calls would collide
+// on the name, and a run that did not clean up (an interrupted one) would leave
+// a snapshot that blocks every later run with
+//
+//	ctr: snapshot "vates-kubeadm-<id>": already exists
+//
+// A monotonic counter removes both: every ctr invocation gets its own id, so
+// --rm can clean it and nothing else ever wants it. The id is not read by
+// anything; it only has to be valid and unused at the moment ctr creates it.
+var ctrRunCounter atomic.Uint64
+
 func ctrContainerID(prefix string) string {
-	return fmt.Sprintf("vates-%s-%d", prefix, os.Getpid())
+	return fmt.Sprintf("vates-%s-%d-%d", prefix, os.Getpid(), ctrRunCounter.Add(1))
 }
 
 // ctrMount renders one bind mount in ctr's --mount syntax.

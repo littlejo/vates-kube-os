@@ -863,6 +863,23 @@ func TestMarkControlPlaneRetriesUntilTheLabelSticks(t *testing.T) {
 	}
 }
 
+func TestCtrContainerIDIsUniquePerRun(t *testing.T) {
+	// The management API answers GetJoinMaterial from one long-lived process and
+	// may answer several calls at once; a per-process id would collide. Every
+	// run must get its own id.
+	seen := map[string]bool{}
+	for range 100 {
+		id := ctrContainerID("kubeadm")
+		if !strings.HasPrefix(id, "vates-kubeadm-") {
+			t.Fatalf("id = %q, want the vates-kubeadm- prefix", id)
+		}
+		if seen[id] {
+			t.Fatalf("ctrContainerID returned %q twice: concurrent runs would collide", id)
+		}
+		seen[id] = true
+	}
+}
+
 func TestApplyOrdersFilesBeforeStartingTheNode(t *testing.T) {
 	paths := testPaths(t)
 	r := &fakeRunner{}
