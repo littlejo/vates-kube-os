@@ -5,6 +5,12 @@ Kubernetes component is a container.
 
 ![Vates Kube OS](docs/images/preview.png)
 
+> [!WARNING]
+> **Experimental — no support, not for production.**
+> Vates Kube OS is a work in progress: it is **not supported** by Vates, and it
+> is **not recommended for production use**. Expect breaking changes and data
+> loss; evaluate it at your own risk.
+
 The image is **built from source**, not from a distribution: **glibc, no
 systemd, no SELinux, no package manager**, every component compiled from its
 upstream source and pinned by sha256. `vates-sysinit` is PID 1; the screen is
