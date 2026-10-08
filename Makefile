@@ -15,7 +15,7 @@ SHELL := /bin/bash
 # driven by an agent rather than in front of you.
 BUILD_LOG ?= $(CURDIR)/build/build.log
 
-.PHONY: help image cli install follow check fmt vet lint go-test configdrives cluster cilium cluster-wait cluster-status cluster-down vip-failover demo-app clean distclean
+.PHONY: help image cli install follow check fmt vet lint go-test configdrives cluster cilium cluster-wait cluster-status cluster-down vip-failover demo-app template clean distclean
 
 # The Kubernetes version the TEST CLUSTER runs. It is not a property of the OS
 # image: the image carries a launcher and serves any supported version. This
@@ -25,6 +25,12 @@ K8S_VERSION ?= v1.31.0
 # Where `make install` puts the CLI. The images are deployed, not installed;
 # only the CLI has an install story.
 PREFIX ?= $(HOME)/.local
+
+# `make template` imports this disk and turns it into a Xen Orchestra VM
+# template (the UUID the CAPI providers clone). XO_URL, XO_TOKEN, XO_POOL and
+# XO_SR come from the environment; see scripts/xo-template.sh.
+VHD ?= build/out/vates.vhd
+TEMPLATE_NAME ?= Vates Kube OS
 
 help: ## Show this help
 	@printf '\nVates Kube OS\n\n'
@@ -48,6 +54,13 @@ image: ## Build the disk (podman: from-scratch userspace + genimage)
 		img="$$(ls -1 build/out/$$f 2>/dev/null)"; \
 		printf '\n  image: %s\n' "$${img:-$$f not found}"; \
 	done
+
+# Turn the built disk into a Xen Orchestra VM template, replacing the previous
+# one of the same name. The CAPI providers clone a template, and building one by
+# hand (upload the VHD, create a VM, attach the disk, convert) is exactly what
+# this automates. It is a host-side deploy step, not part of the image.
+template: ## Create/replace the XO VM template (XO_URL, XO_TOKEN, XO_POOL, XO_SR)
+	VHD=$(VHD) NAME="$(TEMPLATE_NAME)" ./scripts/xo-template.sh
 
 # The operator CLI is a host artifact, shipped alongside the images: it runs off
 # the node and is not part of the disk. It is a FILE target, not .PHONY, so make
