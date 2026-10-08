@@ -18,7 +18,8 @@ var clickDebug = os.Getenv("VATES_WHEEL_DEBUG") != ""
 // reads; past that the oldest are dropped, from the far end.
 const feedMax = 2000
 
-// eventSpacing is the gap between two events, so the feed breathes.
+// eventSpacing is the gap between two events, so the feed breathes. It is the
+// value at the reference resolution; heightOf scales it with the screen.
 const eventSpacing = 4
 
 // line is one event laid out: its identity, its markup, its height, and where it
@@ -86,7 +87,7 @@ func (s *screen) heightOf(key, markup string, width int) int {
 	if len(s.heights) > 4*feedMax {
 		s.heights = make(map[string]int)
 	}
-	h := s.ctx.Measure(s.fonts.event, markup, width) + eventSpacing
+	h := s.ctx.Measure(s.fonts.event, markup, width) + s.u(eventSpacing)
 	s.heights[key] = h
 	return h
 }
@@ -165,9 +166,10 @@ func (s *screen) contentHeight() int {
 	return last.y + last.height
 }
 
-// The scrollbar's shape. Drawing and hit-testing both read it from
-// scrollbarGeometry below, so the bar someone aims at is the bar that was drawn
-// -- not a second copy of the arithmetic free to drift from it.
+// The scrollbar's shape, at the reference resolution. Drawing and hit-testing
+// both read it -- scaled with the screen -- from scrollbarGeometry below, so the
+// bar someone aims at is the bar that was drawn, not a second copy of the
+// arithmetic free to drift from it.
 const (
 	scrollbarW        = 6
 	scrollbarInset    = 4
@@ -179,14 +181,14 @@ const (
 // grabbed.
 func (s *screen) scrollbarGeometry() (x, trackY, trackH, thumbY, thumbH int, ok bool) {
 	content := s.contentHeight()
-	x = s.feedX + s.feedW - s.padH + scrollbarInset
+	x = s.feedX + s.feedW - s.padH + s.u(scrollbarInset)
 	trackY = s.feedY + s.padV
 	trackH = s.feedInnerH
 	if content <= s.feedInnerH {
 		return x, trackY, trackH, 0, 0, false
 	}
 	thumbH = trackH * s.feedInnerH / content
-	thumbH = max(thumbH, scrollbarMinThumb)
+	thumbH = max(thumbH, s.u(scrollbarMinThumb))
 	thumbH = min(thumbH, trackH)
 	pos := 0
 	if m := s.maxOffset(); m > 0 {
@@ -203,21 +205,22 @@ func (s *screen) scrollbarGeometry() (x, trackY, trackH, thumbY, thumbH int, ok 
 // so this costs nothing to do on every scroll.
 func (s *screen) drawScrollbar() {
 	x, trackY, trackH, thumbY, thumbH, ok := s.scrollbarGeometry()
+	barW := s.u(scrollbarW)
 
 	// The strip, cleared to the panel's own fill.
 	s.setColour(colourPanelFill)
-	s.ctx.Rect(float64(x), float64(trackY), float64(scrollbarW), float64(trackH))
+	s.ctx.Rect(float64(x), float64(trackY), float64(barW), float64(trackH))
 	s.ctx.Fill()
 	if !ok {
 		return
 	}
 
 	s.setColour(colourPanelEdge)
-	s.ctx.Rounded(float64(x), float64(trackY), float64(scrollbarW), float64(trackH), float64(scrollbarW)/2)
+	s.ctx.Rounded(float64(x), float64(trackY), float64(barW), float64(trackH), float64(barW)/2)
 	s.ctx.Fill()
 
 	s.setColour(colourScrollThumb)
-	s.ctx.Rounded(float64(x), float64(thumbY), float64(scrollbarW), float64(thumbH), float64(scrollbarW)/2)
+	s.ctx.Rounded(float64(x), float64(thumbY), float64(barW), float64(thumbH), float64(barW)/2)
 	s.ctx.Fill()
 }
 
@@ -232,7 +235,7 @@ func (s *screen) grabScrollbar(px, py int) {
 	if !ok {
 		return
 	}
-	if px < x || px >= x+scrollbarW || py < trackY || py >= trackY+trackH {
+	if px < x || px >= x+s.u(scrollbarW) || py < trackY || py >= trackY+trackH {
 		return
 	}
 	if py >= thumbY && py < thumbY+thumbH {

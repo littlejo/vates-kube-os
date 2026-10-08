@@ -33,7 +33,7 @@ import (
 const BootStatusFile = "/run/vates/boot-status"
 
 const (
-	splashTitle       = "Vates Kube OS"
+	splashTitle       = "VATES KUBE OS"
 	splashWordmark    = "vates-name-baseline-white.png"
 	splashPlanet      = "vates-planete.png"
 	splashLineH       = 22
@@ -132,7 +132,10 @@ func Splash(argv []string) error {
 		s.planet = cairo.PNG(path)
 	}
 	defer s.planet.Destroy()
-	s.title = cairo.NewFont("Poppins Bold 16")
+	// The title is the brand's logotype face, the same one the dashboard's
+	// all-caps labels use. "Poppins Vates" carries only A-Z and a space, so the
+	// title is upper-case on purpose: lower-case would fall back mid-word.
+	s.title = cairo.NewFont("Poppins Vates 16")
 	defer s.title.Free()
 	s.note = cairo.NewFont("Poppins 11")
 	defer s.note.Free()

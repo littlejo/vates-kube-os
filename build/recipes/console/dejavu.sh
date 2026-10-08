@@ -1,8 +1,9 @@
-# DejaVu fonts 2.37 -- the cairo + pango console has no built-in faces and its
-# GUI asks for "Poppins" (not shipped) with a DejaVu fallback, and "DejaVu Sans
-# Mono" for the event feed. Without any font under /usr/share/fonts, fontconfig
-# resolves nothing and pango draws boxes. Pure data: no build, just install the
-# TTFs; fontconfig picks them up from /usr/share/fonts.
+# DejaVu fonts 2.37 -- the cairo + pango console has no built-in faces. DejaVu
+# is the "DejaVu Sans Mono" the event feed is drawn in, and the fallback for
+# whatever the Poppins faces (see poppins.sh) do not carry. Without any font
+# under /usr/share/fonts, fontconfig resolves nothing and pango draws boxes.
+# Pure data: no build, just install the TTFs; fontconfig picks them up from
+# /usr/share/fonts.
 build() {
 	local d
 	d=$(unpack dejavu | tail -n1)

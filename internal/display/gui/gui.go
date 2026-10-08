@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -76,6 +77,7 @@ type screen struct {
 	surface cairo.Surface
 	ctx     *cairo.Context
 	w, h    int
+	scale   float64
 
 	logo  cairo.Surface
 	fonts fonts
@@ -163,6 +165,12 @@ func Run(collect Collector, opts Options) error {
 		heights: make(map[string]int),
 		seen:    make(map[string]bool),
 	}
+	// The one number the whole layout is built from: how much bigger or smaller
+	// this screen is than the size the dashboard was drawn at. The machine does
+	// not choose a resolution we can assume -- a QEMU/qxl console gives 1024x768,
+	// Xen Orchestra's Cirrus VGA gives 800x600 or less -- so the screen measures
+	// itself and everything scales from there.
+	s.scale = scaleFor(s.w, s.h)
 	s.surface = cairo.SurfaceOn(display.Memory(), display.Width(), display.Height(), display.Stride())
 	if !s.surface.Valid() {
 		return fmt.Errorf("console: cairo refused the screen buffer")
@@ -348,15 +356,31 @@ func collectLoop(collect Collector, interval time.Duration, out chan frame) {
 
 func (s *screen) loadFonts() {
 	s.fonts = fonts{
-		hostname: cairo.NewFont("Poppins Bold 16"),
-		label:    cairo.NewFont("Poppins Bold 9"),
-		value:    cairo.NewFont("Poppins Semi-Bold 13"),
-		note:     cairo.NewFont("Poppins 10"),
-		pill:     cairo.NewFont("Poppins Bold 14"),
-		section:  cairo.NewFont("Poppins Bold 12"),
-		event:    cairo.NewFont("DejaVu Sans Mono 11"),
-		footer:   cairo.NewFont("Poppins 11"),
+		hostname: s.font("Poppins Bold", 16),
+		// The all-caps faces are drawn in the "Poppins Vates" logotype subset,
+		// which carries A-Z and nothing else: it is the brand's display face and
+		// it fits these strings (tile labels, EVENTS, READY/STARTING/NOT READY).
+		// Anything with lowercase or digits must use Poppins proper, or the
+		// subset would fall back mid-word -- hence the split.
+		label:   s.font("Poppins Vates", 9),
+		value:   s.font("Poppins Semi-Bold", baseValue),
+		note:    s.font("Poppins", 10),
+		pill:    s.font("Poppins Vates", 14),
+		section: s.font("Poppins Vates", 12),
+		event:   s.font("DejaVu Sans Mono", 11),
+		footer:  s.font("Poppins", 11),
 	}
+}
+
+// font builds a face whose size follows the screen. The sizes above are the ones
+// the dashboard was drawn at; scale grows or shrinks them with the display. The
+// floor of one keeps pango from being handed a size of zero on a tiny screen.
+func (s *screen) font(family string, size float64) cairo.Font {
+	px := size * s.scale
+	if px < 1 {
+		px = 1
+	}
+	return cairo.NewFont(fmt.Sprintf("%s %.0f", family, px))
 }
 
 // loadLogo reads the wordmark, if it is where the caller says it might be. A
@@ -367,28 +391,66 @@ func (s *screen) loadLogo(dirs []string) {
 	}
 }
 
+// The dashboard is authored for a 1024x768 screen: every length in layout is a
+// pixel value at that size. The machines it runs on do not agree on a
+// resolution -- a QEMU/qxl console offers 1024x768, Xen Orchestra's Cirrus VGA
+// offers 800x600 or less -- so the whole layout is scaled to whatever the
+// display gives us. The resolution is READ, not guessed: drm.Open takes the
+// connected connector's preferred mode, and the screen carries it as s.w/s.h.
+const (
+	refW = 1024
+	refH = 768
+
+	// The horizontal rhythm of a tile, at the reference resolution: the padding
+	// around the grid, the gap between tiles, and the inset of a value inside
+	// its tile. They are named because the room a value has -- and so whether it
+	// is ellipsised -- is these against the size of its font (baseValue).
+	refPadding   = 26
+	refTileGap   = 10
+	refTileInset = 14
+
+	// baseValue is the value font's size at the reference resolution.
+	baseValue = 13
+)
+
+// scaleFor is the uniform factor mapping the reference layout onto a screen.
+// The SMALLER of the two ratios is taken on purpose: it keeps the fonts small
+// enough for the tiles. Extra width is absorbed by the tiles and extra height by
+// the feed, never the other way round, so a value can never outgrow its tile.
+func scaleFor(w, h int) float64 {
+	k := math.Min(float64(w)/refW, float64(h)/refH)
+	if k <= 0 {
+		return 1
+	}
+	return k
+}
+
+// u scales a length authored at the reference resolution to this screen.
+func (s *screen) u(v float64) int { return int(math.Round(v * s.scale)) }
+
 // layout computes every rectangle from the screen's own size, so that the
 // console fits whatever mode the machine offers rather than a resolution it
-// hopes for.
+// hopes for. Every fixed length is scaled by s.scale; the ratios between them
+// are what the dashboard's design is, and they are preserved exactly.
 func (s *screen) layout() {
-	s.padding = 26
-	s.brandH = 6
-	s.headerTop = s.brandH + 12
-	s.headerH = 40
-	s.tilesTop = s.headerTop + s.headerH + 14
-	s.tileH = 60
-	s.tileGap = 10
+	s.padding = s.u(refPadding)
+	s.brandH = s.u(6)
+	s.headerTop = s.brandH + s.u(12)
+	s.headerH = s.u(40)
+	s.tilesTop = s.headerTop + s.headerH + s.u(14)
+	s.tileH = s.u(60)
+	s.tileGap = s.u(refTileGap)
 	tilesBottom := s.tilesTop + 2*s.tileH + s.tileGap
 
-	s.sectionTop = tilesBottom + 16
+	s.sectionTop = tilesBottom + s.u(16)
 	s.panelX = s.padding
-	s.panelY = s.sectionTop + 18
+	s.panelY = s.sectionTop + s.u(18)
 	s.panelW = s.w - 2*s.padding
 
-	s.padH = 14
-	s.padV = 10
-	s.footerTop = s.h - 20
-	s.panelH = s.footerTop - 12 - s.panelY
+	s.padH = s.u(14)
+	s.padV = s.u(10)
+	s.footerTop = s.h - s.u(20)
+	s.panelH = s.footerTop - s.u(12) - s.panelY
 
 	s.feedX, s.feedY = s.panelX, s.panelY
 	s.feedW, s.feedH = s.panelW, s.panelH
@@ -399,7 +461,7 @@ func (s *screen) layout() {
 	// says how many lines, and this is the size of one.
 	_, s.lineH = s.ctx.MeasureSize(s.fonts.event, "X", 0)
 	if s.lineH <= 0 {
-		s.lineH = 18
+		s.lineH = s.u(18)
 	}
 }
 

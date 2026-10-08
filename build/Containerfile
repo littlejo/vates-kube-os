@@ -113,6 +113,16 @@ COPY recipes/console/pango.sh /build/recipes/console/pango.sh
 RUN /build/lib/run-recipe.sh pango
 COPY recipes/console/dejavu.sh /build/recipes/console/dejavu.sh
 RUN /build/lib/run-recipe.sh dejavu
+# The Vates typeface: the full Poppins family for the text, and the "Poppins
+# Vates" logotype subset for the all-caps labels. The pin lives here, not in
+# pins.conf, so that adding it does not invalidate the (expensive) libc layer --
+# the same reason systemd-boot's pin is in the disk stage.
+COPY recipes/console/poppins.sh /build/recipes/console/poppins.sh
+ARG POPPINS_URL=https://raw.githubusercontent.com/itfoundry/Poppins/v4.003/products/Poppins-4.003-GoogleFonts-TTF.zip
+ARG POPPINS_SHA256=69cdf3e8bacecc99fd420186d26dd5769c004ee218034457b3691a1cf408967c
+ARG POPPINS_VATES_URL=https://cdn.vates.tech/fonts/poppins_vates/poppins_vates-webfont.ttf
+ARG POPPINS_VATES_SHA256=435b8b0807b4f07e92ab72bafdbb57d8e19194951083fd919822ebd24365fc57
+RUN /build/lib/run-recipe.sh poppins
 
 # --- pass 1: kernel ---------------------------------------------------------
 # Independent of the userspace: builds from the libc stage (which only needs the

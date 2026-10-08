@@ -83,7 +83,7 @@ func (s *screen) drawHeader() {
 	// The pill first: its width is what the centre has to fit between.
 	pillText, pillFill, pillInk := s.pillState()
 	pw, ph := s.ctx.MeasureSize(s.fonts.pill, dashboard.PangoEscape(pillText), 0)
-	pillW, pillH := pw+32, ph+10
+	pillW, pillH := pw+s.u(32), ph+s.u(10)
 	pillX := s.w - s.padding - pillW
 	pillY := s.headerTop + (s.headerH-pillH)/2
 
@@ -96,9 +96,9 @@ func (s *screen) drawHeader() {
 	if name == "" {
 		name = "waiting"
 	}
-	left := s.padding + logoW + 24
-	right := pillX - 24
-	if right-left < 80 {
+	left := s.padding + logoW + s.u(24)
+	right := pillX - s.u(24)
+	if right-left < s.u(80) {
 		// A screen too narrow for three things: the name is the one that can be
 		// dropped, because the pill says the state and the mark says the brand.
 		return
@@ -106,7 +106,7 @@ func (s *screen) drawHeader() {
 	tw, _ := s.ctx.MeasureSize(s.fonts.hostname, dashboard.PangoEscape(name), 0)
 	x := left + (right-left-tw)/2
 	x = max(x, left)
-	s.textLineAt(s.fonts.hostname, colourCream, name, x, s.headerTop+(s.headerH-34)/2, right-x)
+	s.textLineAt(s.fonts.hostname, colourCream, name, x, s.headerTop+(s.headerH-s.u(34))/2, right-x)
 }
 
 // pillState is the text and the colours of the state pill.
@@ -128,6 +128,7 @@ func (s *screen) drawTiles() {
 
 	totalW := s.w - 2*s.padding
 	tileW := (totalW - (cardColumns-1)*s.tileGap) / cardColumns
+	inset := s.u(refTileInset)
 
 	for i := range tiles {
 		if i >= len(labels) {
@@ -141,13 +142,13 @@ func (s *screen) drawTiles() {
 		// The fill and then the hairline, the way the stylesheet does it: five
 		// percent of the cream, a quarter of the purple for the edge.
 		s.setColour(colourTileFill)
-		s.ctx.Rounded(float64(x), float64(y), float64(tileW), float64(s.tileH), 10)
+		s.ctx.Rounded(float64(x), float64(y), float64(tileW), float64(s.tileH), float64(s.u(10)))
 		s.ctx.Fill()
 		s.setColour(colourTileEdge)
-		s.ctx.Rounded(float64(x)+0.5, float64(y)+0.5, float64(tileW)-1, float64(s.tileH)-1, 10)
+		s.ctx.Rounded(float64(x)+0.5, float64(y)+0.5, float64(tileW)-1, float64(s.tileH)-1, float64(s.u(10)))
 		s.ctx.Stroke(1)
 
-		s.textAt(s.fonts.label, colourPurple, labels[i], x+14, y+8, 0)
+		s.textAt(s.fonts.label, colourPurple, labels[i], x+inset, y+s.u(8), 0)
 
 		// The value, and beside it the note when there is one: the percentage is
 		// what is watched, the capacity is what it means. The note is bottom
@@ -156,18 +157,18 @@ func (s *screen) drawTiles() {
 		noteW := 0
 		if t.Note != "" {
 			nw, _ := s.ctx.MeasureSize(s.fonts.note, dashboard.PangoEscape(t.Note), 0)
-			noteW = nw + 6
+			noteW = nw + s.u(6)
 		}
-		vy := y + 24
+		vy := y + s.u(24)
 		vw, vh := s.ctx.MeasureSize(s.fonts.value, dashboard.PangoEscape(t.Value), 0)
-		avail := tileW - 28 - noteW
+		avail := tileW - 2*inset - noteW
 		if vw > avail {
 			vw = avail
 		}
-		s.textLineAt(s.fonts.value, toneColour(t.Tone), t.Value, x+14, vy, avail)
+		s.textLineAt(s.fonts.value, toneColour(t.Tone), t.Value, x+inset, vy, avail)
 		if t.Note != "" {
 			_, nh := s.ctx.MeasureSize(s.fonts.note, dashboard.PangoEscape(t.Note), 0)
-			s.textAt(s.fonts.note, colourNote, t.Note, x+14+vw+6, vy+vh-nh, 0)
+			s.textAt(s.fonts.note, colourNote, t.Note, x+inset+vw+s.u(6), vy+vh-nh, 0)
 		}
 	}
 }
@@ -180,10 +181,10 @@ func (s *screen) drawSection() {
 // drawPanel is the box the feed lives in.
 func (s *screen) drawPanel() {
 	s.setColour(colourPanelFill)
-	s.ctx.Rounded(float64(s.panelX), float64(s.panelY), float64(s.panelW), float64(s.panelH), 10)
+	s.ctx.Rounded(float64(s.panelX), float64(s.panelY), float64(s.panelW), float64(s.panelH), float64(s.u(10)))
 	s.ctx.Fill()
 	s.setColour(colourPanelEdge)
-	s.ctx.Rounded(float64(s.panelX)+0.5, float64(s.panelY)+0.5, float64(s.panelW)-1, float64(s.panelH)-1, 10)
+	s.ctx.Rounded(float64(s.panelX)+0.5, float64(s.panelY)+0.5, float64(s.panelW)-1, float64(s.panelH)-1, float64(s.u(10)))
 	s.ctx.Stroke(1)
 }
 
