@@ -783,6 +783,9 @@ type fakeRunner struct {
 	// bootstrapped makes Stat report the bootstrap marker as present, as on a
 	// control plane that has already run its kubeadm phases once.
 	bootstrapped bool
+	// bootstrapDone makes Stat report the cluster-bootstrap marker as present, as
+	// on a control plane that has already joined or applied its addons once.
+	bootstrapDone bool
 }
 
 func (f *fakeRunner) MkdirAll(path string, mode os.FileMode) error {
@@ -795,6 +798,9 @@ func (f *fakeRunner) WriteFile(path string, mode os.FileMode, content []byte) er
 }
 func (f *fakeRunner) Stat(path string) (os.FileInfo, error) {
 	if f.bootstrapped && path == BootstrappedMarker {
+		return nil, nil
+	}
+	if f.bootstrapDone && path == BootstrapDoneMarker {
 		return nil, nil
 	}
 	return nil, os.ErrNotExist
@@ -942,6 +948,42 @@ func TestApplySkipsKubeadmPhasesWhenAlreadyBootstrapped(t *testing.T) {
 			t.Errorf("Apply() re-ran %q on an already-bootstrapped control plane", c)
 		}
 	}
+}
+
+// A node's cluster bootstrap must run once: vates-init runs on every boot, and
+// a joining control plane that reboots would otherwise re-run `kubeadm join`,
+// which fails pre-flight because it is already a member -- four attempts and
+// about a minute of retries, reported as a bootstrap failure for a healthy node.
+func TestBootstrapSkipsWhenAlreadyDone(t *testing.T) {
+	for _, doc := range []string{masterDoc, workerDoc} {
+		r := &fakeRunner{bootstrapDone: true}
+		if err := Bootstrap(loadConfig(t, doc), bareDrive(t, doc), testPaths(t), "vates-cp-1", "10.0.2.15", r); err != nil {
+			t.Fatalf("Bootstrap() failed: %v", err)
+		}
+		for _, c := range r.commands {
+			if strings.Contains(c, "kubeadm") {
+				t.Errorf("Bootstrap() re-ran %q on a node whose bootstrap is already done", c)
+			}
+		}
+		if len(r.writes) != 0 {
+			t.Errorf("Bootstrap() wrote %v on an already-bootstrapped node", r.writes)
+		}
+	}
+}
+
+// The marker is written only after the stage succeeds, so a failed bootstrap is
+// retried whole rather than half-skipped.
+func TestBootstrapWritesTheDoneMarker(t *testing.T) {
+	r := &fakeRunner{}
+	if err := Bootstrap(loadConfig(t, workerDoc), bareDrive(t, workerDoc), testPaths(t), "vates-worker-1", "10.0.2.15", r); err != nil {
+		t.Fatalf("Bootstrap() failed: %v", err)
+	}
+	for _, w := range r.writes {
+		if w == BootstrapDoneMarker {
+			return
+		}
+	}
+	t.Errorf("Bootstrap() did not write %s; writes were %v", BootstrapDoneMarker, r.writes)
 }
 
 func TestImageTagMatchesTheBuild(t *testing.T) {

@@ -2,6 +2,7 @@ package firstboot
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -289,21 +290,28 @@ func ctrBase(privileged bool) []string {
 
 // ctrContainerID names one run's container.
 //
-// Unique per RUN, not per process: the management API answers GetJoinMaterial
-// from a single long-lived process, and it may answer several calls at once.
-// A per-process id would then be reused -- two concurrent calls would collide
-// on the name, and a run that did not clean up (an interrupted one) would leave
-// a snapshot that blocks every later run with
+// Unique per RUN, and across REBOOTS. Two collisions had to be removed, and
+// both leave a snapshot behind that blocks every later run with
 //
-//	ctr: snapshot "vates-kubeadm-<id>": already exists
+//		ctr: snapshot "vates-kubeadm-<id>": already exists
 //
-// A monotonic counter removes both: every ctr invocation gets its own id, so
-// --rm can clean it and nothing else ever wants it. The id is not read by
-// anything; it only has to be valid and unused at the moment ctr creates it.
+//	  - within a process: the management API answers GetJoinMaterial from one
+//	    long-lived process and may answer several calls at once, so a per-process
+//	    id would collide on concurrent calls. A monotonic counter fixes that.
+//	  - across reboots: the counter restarts with the process, and PID 1 is 1
+//	    again after a reboot, so the same id came back. If a run had been
+//	    interrupted -- a power cut during the first join, exactly the case a node
+//	    must survive -- its snapshot was still there, the retried join could never
+//	    start, and the control plane never joined. Measured: a joining control
+//	    plane stuck with `ctr: snapshot "vates-kubeadm-join-1-1": already exists`
+//	    on every boot after its first join was cut short.
+//
+// The random suffix makes the id unused by construction. The id is read by
+// nothing; it only has to be valid and unused when ctr creates it.
 var ctrRunCounter atomic.Uint64
 
 func ctrContainerID(prefix string) string {
-	return fmt.Sprintf("vates-%s-%d-%d", prefix, os.Getpid(), ctrRunCounter.Add(1))
+	return fmt.Sprintf("vates-%s-%d-%d-%08x", prefix, os.Getpid(), ctrRunCounter.Add(1), rand.Uint32())
 }
 
 // ctrMount renders one bind mount in ctr's --mount syntax.
@@ -680,6 +688,26 @@ func bootstrapped(r Runner) bool {
 	return err == nil
 }
 
+// BootstrapDoneMarker is written once the cluster-wide bootstrap stage has
+// succeeded: the join for a joining control plane, the addons and the CNI for
+// the one that creates the cluster.
+//
+// It is a different marker from BootstrappedMarker on purpose. That one guards
+// the kubeadm INIT phases, which Configure runs before the kubelet exists; this
+// one guards the stage that runs after the API server answers. A reboot must
+// skip both, and a failure in either must be retried whole. It lives in /var,
+// like the other, so an A/B update -- which replaces the system, not the
+// machine's state -- does not undo it.
+//
+// Measured, not assumed: without this, a joining control plane that reboots
+// re-runs `kubeadm join` and fails pre-flight for about a minute; see Bootstrap.
+const BootstrapDoneMarker = "/var/lib/vates/bootstrap-done"
+
+func bootstrapDone(r Runner) bool {
+	_, err := r.Stat(BootstrapDoneMarker)
+	return err == nil
+}
+
 // binarySourceArgs let a container find (or fetch) the Kubernetes binaries this
 // node uses: the shared cache, and the version and mirror the launcher reads.
 //
@@ -792,11 +820,12 @@ func Apply(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName
 			r.Logf("control plane already bootstrapped (%s): skipping the kubeadm init phases", BootstrappedMarker)
 		default:
 			for _, phase := range KubeadmPhases {
+				start := time.Now()
 				args := KubeadmPhaseCommand(KubeletImageRef, phase)
 				if _, err := r.Run(args[0], args[1:]...); err != nil {
 					return fmt.Errorf("kubeadm phase %q: %w", phase, err)
 				}
-				r.Logf("kubeadm init phase %s", phase)
+				r.Logf("kubeadm init phase %s (took %s)", phase, elapsed(start))
 			}
 			// Written only once every phase has succeeded, so an interrupted
 			// bootstrap is retried whole rather than half-skipped.

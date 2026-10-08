@@ -103,7 +103,36 @@ const BootstrapTimeout = 10 * time.Minute
 // systemd unit: everything here needs a working API server, and the API server
 // is a static pod that only starts once the kubelet is running. Configuration
 // ends by starting the kubelet; this begins after it has worked.
+//
+// It runs ONCE per node: BootstrapDoneMarker is the guard, written only after the
+// whole stage has succeeded. Without it a reboot redoes work that is already
+// done, and measured, that is not merely slow -- it is a failure. A joining
+// control plane that reboots re-runs `kubeadm join`, which now fails pre-flight
+// (the node is already a member, its manifests exist, its kubelet already holds
+// :10250), retries four times, spends about a minute, and reports "bootstrap
+// failed" for a node that is perfectly healthy. The node that CREATES the
+// cluster pays the mirror toll: it re-uploads the configuration, mints a fresh
+// bootstrap token, and re-applies the addons and the CNI.
 func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName, nodeIP string, r Runner) error {
+	if bootstrapDone(r) {
+		r.Logf("cluster bootstrap already done (%s): skipping", BootstrapDoneMarker)
+		return nil
+	}
+	if err := bootstrapStage(cfg, drive, paths, nodeName, nodeIP, r); err != nil {
+		return err
+	}
+	// Written only once the whole stage has succeeded, so an interrupted
+	// bootstrap is retried whole rather than half-skipped.
+	if err := r.WriteFile(BootstrapDoneMarker, 0o600, []byte(cfg.Kubernetes.Version+"\n")); err != nil {
+		return fmt.Errorf("writing %s: %w", BootstrapDoneMarker, err)
+	}
+	return nil
+}
+
+// bootstrapStage is the work of Bootstrap, before the idempotency guard: it
+// either joins an existing cluster (a joining control plane) or creates the
+// cluster-wide pieces (the node that bootstrapped), and nothing on a worker.
+func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName, nodeIP string, r Runner) error {
 	if cfg.Role != vatescfg.RoleMaster {
 		// The cluster-wide addons are applied once, by a control plane. A worker
 		// has nothing to do here, and saying so is better than a silent success
@@ -156,13 +185,16 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 		r.Logf("wrote the CNI manifest to %s", FlannelManifestPath)
 	}
 
+	phasesStart := time.Now()
 	for _, phase := range bootstrapPhases(cfg) {
+		start := time.Now()
 		args := KubeadmPhaseCommand(image, phase)
 		if _, err := r.Run(args[0], args[1:]...); err != nil {
 			return fmt.Errorf("kubeadm phase %q: %w", phase, err)
 		}
-		r.Logf("kubeadm init phase %s", phase)
+		r.Logf("kubeadm init phase %s (took %s)", phase, elapsed(start))
 	}
+	r.Logf("bootstrap phases took %s in total", elapsed(phasesStart))
 
 	// The CNI itself. Without it the node stays NotReady -- the kubelet reports
 	// "network plugin is not ready" -- no pod can be scheduled, and CoreDNS,
@@ -171,12 +203,13 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 	// until the operator applies the cluster's CNI, which is the contract.
 	if cfg.CNI.Plugin == vatescfg.CNIFlannel {
 		r.Progress("applying the pod network")
+		start := time.Now()
 		apply := kubectlArgs(image, "--kubeconfig="+SuperAdminKubeconfig,
 			"apply", "-f", FlannelManifestPath)
 		if _, err := r.Run(apply[0], apply[1:]...); err != nil {
 			return fmt.Errorf("applying the CNI manifest: %w", err)
 		}
-		r.Logf("applied the CNI manifest")
+		r.Logf("applied the CNI manifest (took %s)", elapsed(start))
 	} else {
 		r.Progress("no CNI applied (cni.plugin: " + cfg.CNI.Plugin + "); the cluster's CNI is installed from the cluster side")
 		r.Logf("the node stays NotReady until the cluster's CNI is installed")
@@ -189,12 +222,13 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 		return fmt.Errorf("writing the dashboard RBAC: %w", err)
 	}
 	r.Progress("granting the console read access")
+	grantStart := time.Now()
 	grant := kubectlArgs(image, "--kubeconfig="+SuperAdminKubeconfig,
 		"apply", "-f", NodeDashboardRBACPath)
 	if _, err := r.Run(grant[0], grant[1:]...); err != nil {
 		return fmt.Errorf("applying the dashboard RBAC: %w", err)
 	}
-	r.Logf("granted the nodes read access to events (%s)", "vates:node-dashboard")
+	r.Logf("granted the nodes read access to events (%s) (took %s)", "vates:node-dashboard", elapsed(grantStart))
 
 	// The cloud provider's own manifests, when vates-node.yaml names them.
 	// Optional and normally ABSENT under CAPI, where a ClusterResourceSet
@@ -234,12 +268,13 @@ func Bootstrap(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, node
 // Bounded, and the last error is reported.
 func joinControlPlane(image, nodeName string, r Runner) error {
 	args := JoinControlPlaneCommand(image)
+	start := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= JoinAttempts; attempt++ {
 		r.Progress(fmt.Sprintf("joining the cluster (attempt %d of %d)", attempt, JoinAttempts))
 		out, err := r.Run(args[0], args[1:]...)
 		if err == nil {
-			r.Logf("kubeadm join (control plane), attempt %d", attempt)
+			r.Logf("kubeadm join (control plane), attempt %d (took %s)", attempt, elapsed(start))
 			// The join succeeding is not the same as this node's control plane
 			// being up: kubeadm promotes this machine's etcd member from learner
 			// to voter, but the API server static pod starts as soon as its
@@ -392,13 +427,14 @@ func stageJoiningKubeVIP(cfg *vatescfg.Config, nodeIP string, r Runner) error {
 // else will: the endpoint from vates-node.yaml, reached through the VIP.
 func waitForAPI(image string, timeout time.Duration, r Runner) error {
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
 	args := kubectlArgs(image, "--kubeconfig="+SuperAdminKubeconfig, "get", "--raw", "/healthz")
 
 	for attempt := 0; ; attempt++ {
 		out, err := r.Run(args[0], args[1:]...)
 		if err == nil && strings.Contains(string(out), "ok") {
 			if attempt > 0 {
-				r.Logf("the API server answered after %d attempt(s)", attempt+1)
+				r.Logf("the API server answered after %d attempt(s), %s", attempt+1, elapsed(start))
 			}
 			return nil
 		}

@@ -533,15 +533,23 @@ func logDevices() {
 
 // bootLines is the walk through bring-up, and bootSplash the splash child that
 // paints it. Neither must be read while it is being written, hence the mutex.
+//
+// bootPhaseAt remembers when each phase was marked "wait", so the "ok" (or
+// "fail") that closes it can report how long it took. The boot is measured, not
+// felt: "the boot is slow" is not actionable, "the network phase took 31 s" is.
+// The durations land in pid1.log, next to the phase's own output, where an
+// offline read of the disk finds them.
 var (
-	bootMu     sync.Mutex
-	bootLines  []splashStep
-	bootSplash int
+	bootMu      sync.Mutex
+	bootLines   []splashStep
+	bootSplash  int
+	bootPhaseAt = map[string]time.Time{}
 )
 
 // bootStep records one phase of bring-up and rewrites the status file the splash
 // reads. A label already present is updated in place, so a phase can be marked
-// "wait" and then "ok" without appearing twice.
+// "wait" and then "ok" without appearing twice. Closing a phase logs its
+// duration, which is the measurement the whole boot's optimization rests on.
 func bootStep(label, state string) {
 	bootMu.Lock()
 	updated := false
@@ -555,7 +563,22 @@ func bootStep(label, state string) {
 	if !updated {
 		bootLines = append(bootLines, splashStep{label: label, state: state})
 	}
+	var elapsed time.Duration
+	closed := false
+	switch state {
+	case "wait":
+		bootPhaseAt[label] = time.Now()
+	case "ok", "fail":
+		if t0, ok := bootPhaseAt[label]; ok {
+			elapsed = time.Since(t0)
+			closed = true
+		}
+	}
 	bootMu.Unlock()
+	if closed {
+		fmt.Printf("phase %-10s %-4s %s\n", label, state, elapsed.Round(time.Millisecond))
+		kmsg("phase %s: %s in %s", label, state, elapsed.Round(time.Millisecond))
+	}
 	writeBootStatus()
 }
 

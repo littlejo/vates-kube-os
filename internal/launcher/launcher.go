@@ -109,6 +109,7 @@ func ensure(base, version, arch, component, cacheRoot string) (string, error) {
 	}
 
 	url := k8sbin.URL(base, version, arch, component)
+	start := time.Now()
 	fmt.Fprintf(os.Stderr, "vates-launcher: fetching %s\n", url)
 
 	content, err := fetch(url)
@@ -135,7 +136,8 @@ func ensure(base, version, arch, component, cacheRoot string) (string, error) {
 	if err := install(dest, content); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "vates-launcher: %s %s verified and cached\n", component, version)
+	fmt.Fprintf(os.Stderr, "vates-launcher: %s %s verified and cached (%d bytes in %s)\n",
+		component, version, len(content), time.Since(start).Round(time.Millisecond))
 	return dest, nil
 }
 

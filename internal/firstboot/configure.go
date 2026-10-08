@@ -97,15 +97,21 @@ func Configure(opts ConfigureOptions) error {
 	// certificates that are not yet valid and an etcd that refuses to run. One
 	// shot and bounded -- a node that cannot reach its servers boots on the
 	// hypervisor's clock rather than not booting.
+	// Timed: it is a blocking network wait on the configure path, and its cost
+	// on a reboot (where the certificates already exist) is exactly what this
+	// measurement is for.
+	ntpStart := time.Now()
 	if err := SyncClock(cfg.NTPServers()); err != nil {
-		fmt.Printf("time    : %v\n", err)
+		fmt.Printf("time    : %v (took %s)\n", err, elapsed(ntpStart))
 	} else {
-		fmt.Printf("time    : set from %s\n", strings.Join(cfg.NTPServers(), ", "))
+		fmt.Printf("time    : set from %s (took %s)\n", strings.Join(cfg.NTPServers(), ", "), elapsed(ntpStart))
 	}
 
+	applyStart := time.Now()
 	if err := Apply(cfg, drive, DefaultPaths(), nodeName, ip, OSRunner{}); err != nil {
 		return err
 	}
+	fmt.Printf("apply   : took %s\n", elapsed(applyStart))
 	// The file above is what systemd reads at the NEXT boot; this makes the name
 	// true now, before the kubelet starts kube-vip, which names its
 	// leader-election lock after the hostname. A cluster whose control planes
@@ -311,4 +317,11 @@ func dirOf(path string) string {
 		return path[:i]
 	}
 	return "."
+}
+
+// elapsed renders a wait for the boot log, rounded so a millisecond or two of
+// scheduling noise does not read as signal. It exists so "configure" and
+// "bootstrap" can be split into the steps that actually cost something.
+func elapsed(start time.Time) time.Duration {
+	return time.Since(start).Round(time.Millisecond)
 }
