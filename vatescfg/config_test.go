@@ -485,10 +485,14 @@ func TestKubernetesVersionMustBeInTheSupportedRange(t *testing.T) {
 	// would be handed a document its kubeadm refuses -- and the failure would come
 	// from kubeadm, naming a field, rather than from here naming the version.
 	//
-	// A range and not a list: patch releases appear every few weeks, and a list
-	// would mean a new OS image for each one.
-	accept := []string{"v1.31.0", "v1.31.4", "v1.32.7", "v1.33.0", "v1.34.0", "v1.35.6", "v1.36.0", "v1.37.1"}
-	refuse := []string{"v1.30.9", "v1.29.0", "v1.38.0", "v1.40.1"}
+	// A FLOOR, no ceiling: minor releases appear every ~4 months, and a ceiling
+	// would mean rebuilding the OS image for each one. Newer versions are accepted
+	// until a kubeadm refuses them.
+	accept := []string{
+		"v1.31.0", "v1.31.4", "v1.32.7", "v1.33.0", "v1.34.0",
+		"v1.35.6", "v1.36.0", "v1.37.1", "v1.38.0", "v1.42.3",
+	}
+	refuse := []string{"v1.30.9", "v1.29.0", "v1.27.5"}
 
 	for _, v := range accept {
 		doc := strings.Replace(baseWorker, "version: v1.31.0", "version: "+v, 1)

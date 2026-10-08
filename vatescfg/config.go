@@ -453,31 +453,22 @@ const (
 	dnsServiceIPOffset = 10
 )
 
-// SupportedKubernetesMinors is the range of Kubernetes versions this OS knows
-// how to configure, inclusive.
+// SupportedKubernetesMinorMin is the OLDEST Kubernetes minor this OS knows how
+// to configure.
 //
-// A RANGE and not a list, deliberately. Patch releases appear every few weeks,
-// and a list would mean building a new OS image for each one -- the very thing
-// this design exists to avoid. What ties this project to a Kubernetes version is
-// not the binary, which is fetched for whatever version is asked for, but the
-// CONFIGURATION it writes: kubeadm's API is v1beta4 from Kubernetes 1.31, so a
-// 1.30 node would be handed a document its kubeadm refuses, and the failure would
-// come from kubeadm rather than from here.
+// A MINIMUM and no maximum, deliberately. What ties this project to a Kubernetes
+// version is not the binary, which is fetched for whatever version is asked for,
+// but the CONFIGURATION it writes: kubeadm's API is v1beta4 from Kubernetes 1.31,
+// so a 1.30 node would be handed a document its kubeadm refuses, and the failure
+// would come from kubeadm rather than from here.
 //
-// The upper bound is the last release whose kubeadm still accepts v1beta4 and
-// the documents below. v1beta4 was introduced in 1.31 and is still the current
-// kubeadm config API through 1.37; the documents use only fields that have not
-// moved (localAPIEndpoint, nodeRegistration's name and criSocket, networking, the
-// etcd/DNS imageRepository overrides, and a v1beta1 KubeletConfiguration), so
-// the range tracks kubeadm's API rather than our own code.
-//
-// Widening the range means (re)testing the templates the wider range needs. That
-// is the work CAPI's own bootstrap provider does for the versions it supports,
-// and no range can conjure it.
-const (
-	SupportedKubernetesMinorMin = 31
-	SupportedKubernetesMinorMax = 37
-)
+// There is no upper bound because minor releases appear every ~4 months and a
+// bound would mean rebuilding the OS image for each one -- the very thing this
+// design exists to avoid. kubeadm keeps reading v1beta4 for many releases; if it
+// ever stops, the incompatible version fails on the node with a kubeadm error
+// naming the field, and THAT is the moment to raise the floor or add a ceiling.
+// n.b. this is a floor to refuse the past, not a promise about the future.
+const SupportedKubernetesMinorMin = 31
 
 // KubernetesMinor extracts the minor number from a version like v1.31.4.
 //
@@ -666,19 +657,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("kubernetes.version %q must look like v1.31.0", c.Kubernetes.Version)
 	}
 	// Refused here, at the parse, rather than on the node: the templates this
-	// system writes suit a range of versions, and a version outside it would
-	// otherwise fail inside kubeadm, with a message about a field rather than
-	// about a version nobody claimed to support.
+	// system writes need kubeadm's v1beta4 configuration API, which starts at
+	// v1.31, and a version below that would otherwise fail inside kubeadm, with a
+	// message about a field rather than about a version nobody claimed to support.
 	if minor, ok := KubernetesMinor(c.Kubernetes.Version); ok {
-		if minor < SupportedKubernetesMinorMin || minor > SupportedKubernetesMinorMax {
-			return fmt.Errorf("kubernetes.version %s is outside the supported range v1.%d.x to v1.%d.x "+
-				"(the binaries can be fetched for any version; the configuration "+
-				"cannot be written for any version -- kubeadm's API changed at "+
-				"v1.%d, and the templates here are written and tested for the "+
-				"range above)",
-				c.Kubernetes.Version,
-				SupportedKubernetesMinorMin, SupportedKubernetesMinorMax,
-				SupportedKubernetesMinorMin)
+		if minor < SupportedKubernetesMinorMin {
+			return fmt.Errorf("kubernetes.version %s is older than the oldest version this system "+
+				"can configure, v1.%d.x (kubeadm's configuration API is v1beta4 from v1.%d, and "+
+				"the documents written here are read by that API)",
+				c.Kubernetes.Version, SupportedKubernetesMinorMin, SupportedKubernetesMinorMin)
 		}
 	}
 
