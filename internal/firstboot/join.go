@@ -195,7 +195,16 @@ func JoinControlPlaneCommand(image string) []string {
 		ctrContainerID("kubeadm-join"),
 		"/usr/local/bin/kubeadm", "join",
 		"--config", JoinConfigPath,
-		"--skip-phases=kubelet-start",
+		// kubelet-start and kubelet-wait-bootstrap are both skipped, for the same
+		// reason. kubelet-start writes the kubelet settings and (re)starts the
+		// kubelet -- this system runs its own kubelet in a container, already up
+		// by the time the join runs. kubelet-wait-bootstrap then waits for that
+		// kubelet to have bootstrapped itself, which it already has; on
+		// Kubernetes 1.37 it became a TOP-LEVEL phase (it used to be a sub-phase
+		// of kubelet-start), so skipping kubelet-start no longer skipped it, the
+		// wait timed out, and the join failed AFTER writing the control-plane
+		// manifests -- leaving a control plane that ran but was never marked.
+		"--skip-phases=kubelet-start,kubelet-wait-bootstrap",
 		// Five preflight checks are inapplicable here, for two reasons.
 		//
 		// The kubelet is already running by the time the join happens, and it
