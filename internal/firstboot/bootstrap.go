@@ -240,6 +240,16 @@ func joinControlPlane(image, nodeName string, r Runner) error {
 		out, err := r.Run(args[0], args[1:]...)
 		if err == nil {
 			r.Logf("kubeadm join (control plane), attempt %d", attempt)
+			// The join succeeding is not the same as this node's control plane
+			// being up: kubeadm promotes this machine's etcd member from learner
+			// to voter, but the API server static pod starts as soon as its
+			// manifest is written, which can be before the promotion finishes.
+			// Wait for this node's OWN API server to report ready -- /readyz
+			// includes the etcd check -- so the control plane is not called
+			// done while its etcd is still a learner.
+			if err := waitForJoinedControlPlane(image, r); err != nil {
+				r.Logf("%v; continuing, the join itself succeeded", err)
+			}
 			return markControlPlane(image, nodeName, r)
 		}
 		lastErr = err
@@ -250,6 +260,41 @@ func joinControlPlane(image, nodeName string, r Runner) error {
 		}
 	}
 	return fmt.Errorf("kubeadm join (control plane) after %d attempts: %w", JoinAttempts, lastErr)
+}
+
+// JoinedControlPlaneReadyTimeout bounds the wait, after a join, for this node's
+// own API server to report ready. Generous, because it is best-effort and a slow
+// etcd is exactly the condition this system has been seen under.
+const JoinedControlPlaneReadyTimeout = 90 * time.Second
+
+// waitForJoinedControlPlane waits for the API server this node just joined with
+// to answer /readyz, which includes the etcd check.
+//
+// It reads admin.conf, the kubeconfig kubeadm writes DURING the join -- the
+// first credential a joined control plane has, and why this runs here and not
+// when the node was configured. A learner member answers
+//
+//	etcdserver: rpc not supported for learner
+//
+// until kubeadm promotes it, and /readyz fails for that window; waiting on
+// /readyz is waiting for the promotion, plus for the rest of the control plane.
+//
+// Best-effort: the join has already succeeded, so returning an error here would
+// turn a working control plane into a failed bootstrap over a slow disk. A
+// timeout is reported and the caller continues.
+func waitForJoinedControlPlane(image string, r Runner) error {
+	deadline := time.Now().Add(JoinedControlPlaneReadyTimeout)
+	args := kubectlArgs(image, "--kubeconfig=/etc/kubernetes/admin.conf", "get", "--raw", "/readyz")
+	for {
+		out, err := r.Run(args[0], args[1:]...)
+		if err == nil && strings.Contains(string(out), "ok") {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("this control plane's own API server did not report ready within %s", JoinedControlPlaneReadyTimeout)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // MarkAttempts and MarkRetryDelay bound the wait for the node to be registered
