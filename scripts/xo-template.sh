@@ -172,5 +172,19 @@ if [ -z "${KEEP_OLD:-}" ]; then
   done
 fi
 
+# 7. record the new UUID where the next command reads it (.env), so it never has
+#    to be copied by hand. A caller that pipes the script gets it on stdout too.
+if [ -f "$ENV_FILE" ]; then
+  if grep -q '^XO_TEMPLATE_UUID=' "$ENV_FILE"; then
+    tmp=$(mktemp)
+    sed "s|^XO_TEMPLATE_UUID=.*|XO_TEMPLATE_UUID=$VM|" "$ENV_FILE" >"$tmp"
+    cat "$tmp" >"$ENV_FILE"
+    rm -f "$tmp"
+  else
+    printf '\nXO_TEMPLATE_UUID=%s\n' "$VM" >>"$ENV_FILE"
+  fi
+  say "updated XO_TEMPLATE_UUID in $ENV_FILE"
+fi
+
 printf '%s\n' "$VM"
 say "done: template $VM"

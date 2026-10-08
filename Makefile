@@ -61,7 +61,7 @@ image: ## Build the disk (podman: from-scratch userspace + genimage)
 # this automates. It is a host-side deploy step, not part of the image. Values
 # come from a gitignored .env; `NAME=... make template` overrides them.
 template: ## Create/replace the XO VM template (values from .env)
-	./scripts/xo-template.sh
+	@./scripts/xo-template.sh
 
 # The operator CLI is a host artifact, shipped alongside the images: it runs off
 # the node and is not part of the disk. It is a FILE target, not .PHONY, so make
