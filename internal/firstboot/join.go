@@ -222,8 +222,22 @@ func JoinControlPlaneCommand(image string) []string {
 		//     kubeadm uses it in the kubelet-start phase, which this join skips
 		//     (`--skip-phases=kubelet-start`).
 		//
+		// Kubernetes 1.37 adds three more checks that assume a full host, and
+		// which are just as inapplicable to this containerised join:
+		//
+		//   FileExisting-losetup, FileExisting-cp
+		//     losetup (util-linux) and cp (coreutils) are absent on purpose: the
+		//     kubelet container is FROM scratch and carries only what the kubelet
+		//     shells out to. kubeadm 1.37 merely checks that they exist.
+		//   SystemVerification
+		//     its cgroup check wants a cgroupfs mount point in /proc/mounts,
+		//     which a container does not have; the kernel-module checks it also
+		//     covers are known-good for this image's kernel. Without this the
+		//     join fails at preflight on 1.37 and a joining control plane never
+		//     becomes one (it stays Ready, with no control-plane role).
+		//
 		// These and nothing else: any other preflight failure is still a failure.
-		"--ignore-preflight-errors=FileAvailable--etc-kubernetes-kubelet.conf,FileAvailable--etc-kubernetes-bootstrap-kubelet.conf,Port-10250,FileExisting-conntrack,FileExisting-nsenter",
+		"--ignore-preflight-errors=FileAvailable--etc-kubernetes-kubelet.conf,FileAvailable--etc-kubernetes-bootstrap-kubelet.conf,Port-10250,FileExisting-conntrack,FileExisting-nsenter,FileExisting-losetup,FileExisting-cp,SystemVerification",
 	)
 }
 
