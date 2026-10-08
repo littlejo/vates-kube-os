@@ -101,6 +101,13 @@ libvirt (visible in virt-manager). The machines join over the management API;
 there is no SSH and no local login. `make cluster-status`, `make vip-failover`
 and `make demo-app` complete the picture.
 
+To run the image where the CAPI providers do — as a **Xen Orchestra VM
+template** they clone — `make template` imports the built disk and turns it into
+one, replacing the previous template of the same name (`NAME=... make template`
+or a gitignored `.env`; `make cluster` can boot the same image). The conversion
+uses XO's internal API for the final step, so it needs `xo-cli`; see
+[`scripts/xo-template.sh`](scripts/xo-template.sh).
+
 To bring one up by hand, without the script, and to understand what each step
 does: [`docs/USAGE.md`](docs/USAGE.md).
 
@@ -169,11 +176,23 @@ program: [`docs/BINARIES.md`](docs/BINARIES.md).
       writes about itself moved under `/var`, verified by `test/ro.sh`
 - [x] immutability step 2: the A/B switchover and boot-counted rollback, through
       the management API (`vateskctl ab status|switch`), verified by `test/ab.sh`
+- [x] **one image, any Kubernetes version**: a launcher fetches the binary the
+      node document asks for. The configuration supports **v1.31 and newer, with
+      no ceiling** (the floor is kubeadm's `v1beta4` API), tested through v1.37
+- [x] the document carries the **node name and the PKI** (`node.name`,
+      `pki.clusterCA`, `pki.apiCA`), so the CAPI path — a `user-data` and no files
+      — is complete; a bootstrapping control plane **reuses an injected cluster
+      CA** instead of generating one
+- [x] `make template`: the built disk becomes a **Xen Orchestra VM template** the
+      CAPI providers clone (`scripts/xo-template.sh`)
 - [ ] **TODO** — the updater, `vateskctl ab update`: write the inactive root, then
       switch. (Today the API only switches between two slots that both already
       hold a system.)
-- [ ] immutability step 3: dm-verity
-- [ ] the VATES CAPI provider
+- [ ] immutability step 3: wire the verifier (`internal/update/imgsig`, done)
+      into the updater; verified boot (`dm-verity`, signed UKI, Secure Boot) stays
+      optional
+- [ ] the VATES CAPI provider (its node-side prerequisite — the injected CA — is
+      in place)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the detail and
 [`build/README.md`](build/README.md) for how the image is built.

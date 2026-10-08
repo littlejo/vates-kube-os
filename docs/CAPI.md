@@ -101,11 +101,20 @@ verifies the client. A client is admitted only with `O=vates:admin` or
   operator generates its own CA and injects it into the node's drive — see
   [`API.md`](API.md).
 
-## Where the current bootstrap provider stands
+## The CA the provider owns
 
-A bootstrapping control plane currently generates its own cluster CA, so a
-provider can *fetch* it (through `GetKubeconfig`) but does not hold the private
-key. Joining machines are therefore served through `GetJoinMaterial`, from a live
-control plane. Injecting the CA into the bootstrapping node — so the provider
-issues everything itself — is the direction of travel, and the interface is
-planned to make that a one-line switch.
+The document can carry the PKI, which is the only channel the CAPI path has (a
+hypervisor gives a VM a `user-data` and no files):
+
+- `pki.clusterCA` — the cluster authority. A **bootstrapping** control plane
+  **reuses** it instead of generating one, so the provider owns the CA and no
+  node holds the private key unless the provider sends it (certificate only is
+  the normal case);
+- `pki.apiCA` — the operator's authority for the management API.
+
+The provider can therefore issue the join material itself — the token, the
+certificate key and the CA hash — and never call a node. If it would rather not
+own the signing, the fallback still works: *fetch* the cluster CA from the first
+control plane through `GetKubeconfig`, and ask a live control plane for join
+material with `GetJoinMaterial`. Keep both behind one interface, so switching to
+"issue it from the CA I own" is a single change.

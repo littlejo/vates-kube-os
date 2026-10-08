@@ -25,8 +25,8 @@ The machine receives a **config drive** (a small read-only disk labelled
 
 | file | content |
 |---|---|
-| `meta-data` | the **node name** (`local-hostname`) |
-| the configuration | the node document, in the `user-data` slot or as a `vates-node.yaml` file |
+| `meta-data` | NoCloud meta-data; its `local-hostname` is the **fallback** node name |
+| the configuration | the node document, in the `user-data` slot or as a `vates-node.yaml` file — it may state the node name (`node.name`) and the PKI |
 
 The node says which it read at boot (`config : user-data` or
 `config : vates-node.yaml`). The document itself is the same YAML either way —
@@ -129,7 +129,7 @@ the address may change on every DHCP lease:
 
 | | value | changes? |
 |---|---|---|
-| node name | `local-hostname` from `meta-data` | **never** |
+| node name | `node.name` in the document, or `local-hostname` from `meta-data` | **never** |
 | address | DHCP lease | yes |
 
 The kernel hostname is set to the node name, the kubelet gets
@@ -141,8 +141,11 @@ cluster endpoint is always the **virtual IP**, never a node's address.
 ```yaml
 role: worker                  # master (control plane) or worker
 
+node:
+  name: vates-cp-1            # optional; wins over the drive's meta-data
+
 kubernetes:
-  version: v1.31.0            # v1.31.x .. v1.33.x
+  version: v1.31.0            # v1.31 or newer
 
 cluster:
   controlPlaneEndpoint: "192.168.122.200:6443"
@@ -162,9 +165,14 @@ dashboard:
   mode: gui                   # tui | gui — what the console shows
 ```
 
-The node name is not here: it comes from the drive's `meta-data`, so a provider
-has one place to put it. Optional blocks (`registry`, `binaries`, `api`, `cloud`,
-`time`) cover air-gapped clusters and a few deployment choices; the schema is in
+`node.name` states the name when the writer knows it — the CAPI bootstrap
+provider does — and wins over the drive's `meta-data`; `local-hostname` stays the
+fallback a hand-built drive uses. The document can also carry the **PKI**
+(`pki.clusterCA` for the cluster authority, `pki.apiCA` for the management API),
+which is how a provider that owns the CA hands it to a node with no file channel;
+a bootstrapping control plane then **reuses** that CA instead of generating one.
+Optional blocks (`registry`, `binaries`, `api`, `cloud`, `time`) cover air-gapped
+clusters and a few deployment choices; the schema is in
 [`vatescfg/config.go`](../vatescfg/config.go).
 
 ## One image, any Kubernetes version
@@ -174,9 +182,12 @@ the node reads `kubernetes.version` from the document, fetches the binary,
 verifies the published digest, caches it under `/var`, and runs it. Binaries
 live in `/var` — the mutable half — which is exactly the immutability split.
 
-The **configuration** supports `v1.31` to `v1.33` (kubeadm's configuration API),
-and a version outside that range is refused when the file is read, not later on
-the machine.
+The **configuration** supports `v1.31` and newer, with **no upper bound**: the
+floor is kubeadm's configuration API (`v1beta4` from 1.31), and a version below it
+is refused when the file is read, not later on the machine. A ceiling would mean
+rebuilding the image for every minor; if kubeadm ever stops reading `v1beta4`, the
+incompatible version fails on the node with an error naming the field, and that is
+when the bound is revisited. Tested through `v1.37`.
 
 ## Immutable, with an A/B update path
 
@@ -199,11 +210,17 @@ See [`API.md`](API.md).
 - [x] the node document schema, validated
 - [x] configure a **worker** and a **control plane** (kubeadm + kube-vip)
 - [x] a 3 + 3 test cluster over libvirt, etcd with 3 voters, VIP failover
+- [x] one image, any Kubernetes version (v1.31 and newer, no ceiling)
+- [x] the document carries the node name and the PKI; a bootstrapping control
+      plane reuses an injected cluster CA
 - [x] read-only root, `/var` on its own partition
 - [x] A/B switchover and boot-counted rollback through the API
+- [x] `make template`: the disk becomes a Xen Orchestra VM template
 - [ ] the updater, `vateskctl ab update` (write the inactive root, then switch)
-- [ ] image verification at update time (dm-verity)
-- [ ] the CAPI provider
+- [ ] image verification at update time (the verifier exists; the updater must
+      call it). Verified boot (dm-verity) stays optional
+- [ ] the CAPI provider (its node-side prerequisite — the injected CA — is in
+      place)
 
 ## Where to go next
 

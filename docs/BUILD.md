@@ -130,6 +130,15 @@ make clean      # remove the produced disk and staged content
 make distclean  # also drop fetched sources and the build cache
 ```
 
+To publish the disk as a **Xen Orchestra VM template** — what the CAPI providers
+clone — `make template` imports `build/out/vates.vhd`, creates a UEFI VM, attaches
+the disk, converts it to a template, and replaces the previous one of the same
+name. Values (`XO_URL`, `XO_TOKEN`, `XO_POOL`, `XO_SR`, `NAME`, `VHD`) come from a
+gitignored `.env`, and an environment variable overrides the file. The final
+conversion uses XO's internal JSON-RPC API (the REST API cannot set
+`is_a_template`), so the script needs `xo-cli`; see
+[`scripts/xo-template.sh`](../scripts/xo-template.sh).
+
 ## Testing and diagnosing
 
 ```bash

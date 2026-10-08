@@ -67,10 +67,11 @@ the management port.
   ```
 
   It writes, under `$XDG_DATA_HOME/vates/kube-clusters/my-cluster/`: `api-ca.crt`
-  and `api-ca.key` (inject both into the node's config drive under the same
-  names), `client.crt`/`client.key`, and `client.kubeconfig`. The node mints its
-  **server** certificate from that CA; the operator verifies it with the same CA
-  and calls the API with its client certificate. One authority covers both
+  and `api-ca.key`, `client.crt`/`client.key`, and `client.kubeconfig`. The two
+  `api-ca` files reach the node as config-drive files of the same name, or as
+  `pki.apiCA` in the node document where there is no file channel. The node mints
+  its **server** certificate from that CA; the operator verifies it with the same
+  CA and calls the API with its client certificate. One authority covers both
   directions, and nothing is fetched from the node.
 
 When both `api-ca.crt` and `api-ca.key` are present under `/etc/vates/`, they
