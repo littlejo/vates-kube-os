@@ -64,7 +64,17 @@ func KubeletEnvironment(path string) (version, binaryBase string, err error) {
 // phases used, because neither binary is on the host -- that is the point of
 // this OS -- and reads the cluster's CA from the PKI kubeadm wrote.
 func CollectJoinCredentials(paths Paths, version, binaryBase string, r Runner) (JoinCredentials, error) {
-	caHash, err := caCertHash(filepath.Join(paths.Kubernetes, "pki", "ca.crt"))
+	caPath := filepath.Join(paths.Kubernetes, "pki", "ca.crt")
+	caHash, err := caCertHash(caPath)
+	if err != nil {
+		return JoinCredentials{}, err
+	}
+	// The certificate key is DERIVED from the CA, so every upload uses the same
+	// one. kubeadm re-encrypts the uploaded certificates with the key it is
+	// given, so a fresh key per call would invalidate the keys already handed to
+	// machines about to join -- which is exactly what a joining control plane
+	// decodes them with.
+	certKey, err := joinCertificateKey(caPath)
 	if err != nil {
 		return JoinCredentials{}, err
 	}
@@ -72,8 +82,7 @@ func CollectJoinCredentials(paths Paths, version, binaryBase string, r Runner) (
 	if err != nil {
 		return JoinCredentials{}, err
 	}
-	certKey, err := uploadCertificateKey(version, binaryBase, r)
-	if err != nil {
+	if _, err := uploadCertificateKey(version, binaryBase, certKey, r); err != nil {
 		return JoinCredentials{}, err
 	}
 	return JoinCredentials{Token: token, CertificateKey: certKey, CACertHash: caHash}, nil
@@ -110,22 +119,35 @@ func createBootstrapToken(version, binaryBase string, r Runner) (string, error) 
 		"the controller-manager's cluster-info signer may not be running", id)
 }
 
-// uploadCertificateKey re-uploads the cluster certificates and returns the fresh
-// certificate key a joining control plane fetches them with.
+// uploadCertificateKey re-uploads the cluster certificates with the given key.
 //
-// "re-uploads" because kubeadm has no way to show the key it generated during
-// bootstrap: only the encrypted certificates are kept, never the key. Running
-// the phase again produces a new, equally valid key.
-func uploadCertificateKey(version, binaryBase string, r Runner) (string, error) {
-	out, err := run(r, kubeadmImageArgs(version, binaryBase, "init", "phase", "upload-certs", "--upload-certs"))
-	if err != nil {
+// The key is passed rather than generated: kubeadm's upload-certs re-encrypts
+// the uploaded certificates with the key it is given, so re-running with a new
+// key each time would invalidate every key already handed out. See
+// joinCertificateKey -- the key is stable, so the upload is idempotent.
+func uploadCertificateKey(version, binaryBase, key string, r Runner) (string, error) {
+	if _, err := run(r, kubeadmImageArgs(version, binaryBase, "init", "phase", "upload-certs", "--upload-certs", "--certificate-key", key)); err != nil {
 		return "", fmt.Errorf("uploading the cluster certificates: %w", err)
 	}
-	key := lastLine(out)
-	if key == "" || strings.ContainsAny(key, " \t") {
-		return "", fmt.Errorf("kubeadm did not return a certificate key (got %q)", key)
-	}
 	return key, nil
+}
+
+// joinCertificateKey is the certificate key every upload uses, derived from the
+// cluster CA so it is stable for the cluster's whole life.
+//
+// It has to be stable: any control plane can answer GetJoinMaterial, and each
+// answer re-uploads the certificates; a key that changed per call would make the
+// ones already given to machines about to join undecryptable ("cipher: message
+// authentication failed" at download-certs). Deriving it from the CA ties it to
+// the cluster, not to a call, so every machine gets the same key and the secret
+// always decrypts with it.
+func joinCertificateKey(caCertPath string) (string, error) {
+	raw, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return "", fmt.Errorf("reading the cluster CA: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // caCertHash is kubeadm's --discovery-token-ca-cert-hash: the sha256 of the CA

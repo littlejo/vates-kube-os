@@ -86,27 +86,96 @@ func (f *joinFake) Run(name string, args ...string) ([]byte, error) {
 }
 
 func TestCollectJoinCredentials(t *testing.T) {
-	paths := testPaths(t)
-	caHash := writeCACert(t, filepath.Join(paths.Kubernetes, "pki", "ca.crt"))
+	tests := []struct {
+		name  string
+		calls int
+	}{
+		{
+			// The nominal path: a token, the CA hash and a certificate key
+			// derived from the CA.
+			name:  "returns the token, the CA hash and a CA-derived certificate key",
+			calls: 1,
+		},
+		{
+			// Regression: kubeadm's upload-certs re-encrypts the uploaded
+			// certificates with the key it is given, so every call has to hand
+			// it the SAME key -- a fresh key would invalidate the one a joining
+			// control plane is about to decode the certificates with.
+			name:  "hands every call the same certificate key",
+			calls: 3,
+		},
+	}
 
-	oldAttempts, oldInterval := tokenSignAttempts, tokenSignInterval
-	tokenSignAttempts, tokenSignInterval = 2, 0
-	defer func() { tokenSignAttempts, tokenSignInterval = oldAttempts, oldInterval }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := testPaths(t)
+			caPath := filepath.Join(paths.Kubernetes, "pki", "ca.crt")
+			caHash := writeCACert(t, caPath)
+			wantKey := sha256Hex(t, caPath)
 
-	r := &joinFake{}
-	c, err := CollectJoinCredentials(paths, "v1.31.0", "", r)
+			oldAttempts, oldInterval := tokenSignAttempts, tokenSignInterval
+			tokenSignAttempts, tokenSignInterval = 2, 0
+			defer func() { tokenSignAttempts, tokenSignInterval = oldAttempts, oldInterval }()
+
+			var first string
+			for i := 0; i < tt.calls; i++ {
+				r := &joinFake{}
+				c, err := CollectJoinCredentials(paths, "v1.31.0", "", r)
+				if err != nil {
+					t.Fatalf("CollectJoinCredentials() call %d failed: %v", i+1, err)
+				}
+				if c.Token != "abcdef.0123456789abcdef" {
+					t.Errorf("token = %q, want abcdef.0123456789abcdef", c.Token)
+				}
+				if c.CACertHash != caHash {
+					t.Errorf("CA hash = %q, want %q", c.CACertHash, caHash)
+				}
+				if c.CertificateKey != wantKey {
+					t.Errorf("certificate key = %q, want the CA digest %q", c.CertificateKey, wantKey)
+				}
+				if i == 0 {
+					first = c.CertificateKey
+				} else if c.CertificateKey != first {
+					t.Errorf("certificate key changed between calls: %q then %q", first, c.CertificateKey)
+				}
+				// The key is meaningless unless kubeadm encrypts the uploaded
+				// certificates with it.
+				if !anyCommandHas(r.commands, "upload-certs", "--certificate-key", c.CertificateKey) {
+					t.Errorf("no upload-certs command carried --certificate-key %q (commands: %q)", c.CertificateKey, r.commands)
+				}
+			}
+		})
+	}
+}
+
+// sha256Hex is the digest of a file, the way joinCertificateKey derives the
+// certificate key from the CA.
+func sha256Hex(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("CollectJoinCredentials() failed: %v", err)
+		t.Fatal(err)
 	}
-	if c.Token != "abcdef.0123456789abcdef" {
-		t.Errorf("token = %q", c.Token)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// anyCommandHas reports whether one recorded command contains all the given
+// fragments -- enough to pin the argv a helper actually ran.
+func anyCommandHas(commands []string, fragments ...string) bool {
+	for _, cmd := range commands {
+		ok := true
+		for _, fragment := range fragments {
+			if !strings.Contains(cmd, fragment) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
 	}
-	if c.CertificateKey != strings.Repeat("a", 64) {
-		t.Errorf("certificate key = %q", c.CertificateKey)
-	}
-	if c.CACertHash != caHash {
-		t.Errorf("CA hash = %q, want %q", c.CACertHash, caHash)
-	}
+	return false
 }
 
 // A token is useless until the cluster-info signature is published; a helper
