@@ -1,0 +1,23 @@
+Vates Kube OS — third-party notices
+====================================
+
+This image is assembled from pinned upstream sources. The list of record is
+build/pins.conf in the source repository: one line per component, naming its
+version, its source tarball, its sha256 and its upstream URL. Each component's
+license text is kept under /usr/share/licenses/ when upstream ships one.
+
+The Xen guest agent and the C libraries it links:
+
+  libxenstore, libxentoolcore, libxentoollog        LGPL-2.1-or-later
+      from Xen 4.21.2 — https://xenproject.org/
+      license text: /usr/share/licenses/libxenstore/
+
+  xen-guest-agent                                   AGPL-3.0-only
+      from https://gitlab.com/xen-project/xen-guest-agent
+      license text: /usr/share/licenses/xen-guest-agent/
+
+The libraries are linked dynamically — the .so files are separate files under
+/usr/lib — so a recipient can replace them; no relinking is required.
+
+The full sources and the recipes that build the image are in the Vates Kube OS
+repository (build/recipes/).

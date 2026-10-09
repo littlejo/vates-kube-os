@@ -15,10 +15,9 @@ source "${SCRATCH}/lib/common.sh"
 CTX="${SCRATCH}/context"
 OUT="${OUT:-/out}"
 GENIMAGE="${GENIMAGE:-/opt/host/bin/genimage}"
-# Built in their own Containerfile stages (COPY --from=vates / COPY --from=xe)
-# and by lib/build-kubelet-image.sh -- no longer host artifacts.
-VATES_BIN="${VATES_BIN:-/build/vates-bin}"
-XE_DIR="${XE_DIR:-/build/xe}"
+# The vates binaries and the Xen guest agent are already in ${SYSROOT}, installed
+# by the recipes (the `vates` and `guest` stages, copied in by `disk`); assembly
+# does not copy binaries.
 KUBELET_TAR="${KUBELET_TAR:-/build/kubelet.tar}"
 
 ROOT_A_PARTUUID="d3e1f3a0-1b2c-4d5e-8f90-a1b2c3d4e5f6"
@@ -57,20 +56,12 @@ fi
 [ -e "${SYSROOT}/etc/resolv.conf" ] || ln -s ../run/resolv.conf "${SYSROOT}/etc/resolv.conf"
 chmod 0755 "${SYSROOT}/usr/share/udhcpc/default.script" 2>/dev/null || true
 
-echo "=== [assemble] the vates binaries ==="
-install -d "${SYSROOT}/usr/local/bin"
-for c in vates-sysinit vates-console vates-api vates-kubelet-run; do
-	install -m 0755 "${VATES_BIN}/${c}" "${SYSROOT}/usr/local/bin/${c}"
-done
+echo "=== [assemble] the vates faces ==="
+# The binaries themselves are already in ${SYSROOT}/usr/local/bin (installed by
+# the recipes); assemble only adds the argv[0] faces, which are assembly.
 ln -sf vates-sysinit "${SYSROOT}/usr/local/bin/vates-init"
 ln -sf vates-sysinit "${SYSROOT}/usr/local/bin/vates-splash"
 ln -sf vates-console "${SYSROOT}/usr/local/bin/vates-dashboard"
-for f in xe-daemon xe-linux-distribution; do
-	if [ -f "${XE_DIR}/${f}" ]; then
-		install -D -m 0755 "${XE_DIR}/${f}" "${SYSROOT}/usr/sbin/${f}"
-		echo "  xen guest agent: ${f}"
-	fi
-done
 
 echo "=== [assemble] overlay, /etc, assets, kubelet image ==="
 cp -a "${CTX}/overlay/." "${SYSROOT}/"

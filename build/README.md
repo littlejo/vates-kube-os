@@ -121,9 +121,9 @@ dl/                   fetched source tarballs (gitignored)
 ```
 
 Inside the Containerfile, beyond the passes: a `go-base` stage (Fedora's Go) with
-`vates` (the vates binaries + launcher) and `xe` (the Xen guest agent) built from
-it; systemd-boot built in the `disk` stage; and the kubelet image built from
-`/sysroot` by `lib/build-kubelet-image.sh`.
+`vates` (the vates binaries) built from it; the `guest` pass (the Rust Xen guest
+agent and libxenstore) on `socle`; systemd-boot built in the `disk` stage; and the
+kubelet image built from `/sysroot` by `lib/build-kubelet-image.sh`.
 
 ## Status
 
@@ -133,9 +133,9 @@ it; systemd-boot built in the `disk` stage; and the kubelet image built from
 - [x] pass 3 (tools) + pass 4 (console) + pass 5 (containerd/runc/CNI)
 - [x] pass 1 (kernel) + pass 6 (assemble) — a bootable A/B disk (`out/vates.qcow2`)
 - [x] the disk boots under UEFI: systemd-boot → kernel → `vates-sysinit` → console
-- [x] nothing is built on the host: the vates binaries, the Xen agent, the kubelet
-      image and systemd-boot are all built by the Containerfile (Go stages, a
-      hand-built docker-archive, a systemd-boot stage)
+- [x] nothing is built on the host: the vates binaries, the Rust Xen agent, the
+      kubelet image and systemd-boot are all built by the Containerfile (recipes,
+      with the Go and Rust toolchains borrowed from the base)
 - [x] the disk boots and `make cluster CP=1 WORKERS=0` brings up a real
       single-node control plane: etcd, apiserver, controller-manager, scheduler,
       kube-vip, kube-proxy, flannel and coredns all Running, node Ready
