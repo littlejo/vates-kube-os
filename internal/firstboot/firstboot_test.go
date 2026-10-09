@@ -999,6 +999,64 @@ func TestCiliumOperatorCreatesTheCRDs(t *testing.T) {
 	}
 }
 
+// The operator runs with one replica (the chart's required pod anti-affinity
+// would leave a second one Pending on a single-node cluster), so its rolling
+// update must make room BEFORE it creates: maxUnavailable 100%. The chart's
+// 50% is 0 of one replica, which forces the rollout to schedule a surge pod
+// first -- and the very anti-affinity that justifies the single replica would
+// refuse to run two operators on the one node, so the update hangs. maxSurge
+// stays 0 for the same reason: a surge pod on the only node cannot be
+// scheduled either.
+func TestCiliumOperatorUpdateSurvivesASingleNode(t *testing.T) {
+	m, err := CiliumManifest(loadConfig(t, ciliumMasterDoc))
+	if err != nil {
+		t.Fatalf("CiliumManifest() failed: %v", err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(m))
+	found := false
+	for {
+		var doc struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+			Spec struct {
+				Replicas *int `yaml:"replicas"`
+				Strategy struct {
+					RollingUpdate struct {
+						MaxSurge       string `yaml:"maxSurge"`
+						MaxUnavailable string `yaml:"maxUnavailable"`
+					} `yaml:"rollingUpdate"`
+				} `yaml:"strategy"`
+			} `yaml:"spec"`
+		}
+		err := dec.Decode(&doc)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("the cilium manifest is not valid YAML: %v", err)
+		}
+		if doc.Kind != "Deployment" || doc.Metadata.Name != "cilium-operator" {
+			continue
+		}
+		found = true
+		if doc.Spec.Replicas == nil || *doc.Spec.Replicas != 1 {
+			t.Fatalf("the operator deployment runs %v replicas, want 1", *doc.Spec.Replicas)
+		}
+		ru := doc.Spec.Strategy.RollingUpdate
+		if ru.MaxUnavailable != "100%" {
+			t.Errorf("the operator rollingUpdate has maxUnavailable %q, want 100%%: 50%% of one replica is 0, and the rollout would need a surge pod the anti-affinity cannot schedule", ru.MaxUnavailable)
+		}
+		if ru.MaxSurge != "0" {
+			t.Errorf("the operator rollingUpdate has maxSurge %q, want 0: a surge operator cannot be scheduled beside the running one on a single node", ru.MaxSurge)
+		}
+	}
+	if !found {
+		t.Fatal("the cilium manifest has no cilium-operator Deployment")
+	}
+}
+
 // The rendered manifest must stay a document the API server can apply:
 // parseable YAML, with exactly the objects the chart renders for this
 // configuration. The count is the assertion: adding or dropping a resource

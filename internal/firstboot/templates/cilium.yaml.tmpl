@@ -34,7 +34,11 @@
 #     dial proves the socket is reachable.
 #   - the operator runs with one replica. The chart ships two with a
 #     required pod anti-affinity, which would leave the second pod Pending
-#     on a single-node cluster.
+#     on a single-node cluster. With one replica the rolling update goes to
+#     maxUnavailable: 100% (the chart's own setting for this case): at
+#     50% the update would need a surge pod first, and the same anti-affinity
+#     that justifies the single replica would refuse to schedule it, so the
+#     rollout hangs.
 #
 # The manifest is embedded rather than fetched at boot, exactly like the
 # flannel one: it is a versioned artifact of the OS image, and a control
@@ -1387,8 +1391,8 @@ spec:
   # podAntiAffinity which prevents deployments of multiple operator replicas on the same node.
   strategy:
     rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 50%
+      maxSurge: 0
+      maxUnavailable: 100%
     type: RollingUpdate
   template:
     metadata:
