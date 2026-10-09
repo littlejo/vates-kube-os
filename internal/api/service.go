@@ -228,6 +228,7 @@ var nodeLogFiles = []string{
 	"/var/log/vates/kubelet.log",
 	"/var/log/vates/containerd.log",
 	"/var/log/vates/vates-api.log",
+	"/var/log/vates/xen-guest-agent.log",
 }
 
 // GetLogs returns the tail of each log. A node has no shell, so this is the only
