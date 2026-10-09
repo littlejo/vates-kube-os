@@ -61,15 +61,13 @@ const (
 	// The management API (mTLS gRPC), the thing that replaces SSH: a child of
 	// PID 1.
 	pid1API = "/usr/local/bin/vates-api"
-	// The Xen guest agent (the Containerfile's xe stage). xe-linux-distribution
-	// writes the OS cache xe-daemon reads; xe-daemon publishes the guest's view
-	// of itself to XenStore for Xen Orchestra. Not needed for providerID -- the
-	// CCM maps a node by SystemUUID -- but it is what makes the VM's IP, its OS
-	// and a clean shutdown visible to the hypervisor.
-	pid1XeDaemon     = "/usr/sbin/xe-daemon"
-	pid1XeDistroInfo = "/usr/sbin/xe-linux-distribution"
-	// The OS cache xe-daemon's CollectOS reads, written by pid1XeDistroInfo.
-	pid1XeOSCache = "/var/cache/xe-linux-distribution"
+	// The Xen guest agent (the Containerfile's `guest` pass): the Rust
+	// gitlab.com/xen-project/xen-guest-agent. It detects the guest OS itself and
+	// publishes the guest's view of itself to XenStore for Xen Orchestra. Not
+	// needed for providerID -- the CCM maps a node by SystemUUID -- but it is
+	// what makes the VM's IP, its OS and a clean shutdown visible to the
+	// hypervisor.
+	pid1XenGuestAgent = "/usr/sbin/xen-guest-agent"
 	// The kubelet image, shipped as a docker-archive and imported on first boot.
 	// It is the launcher that fetches the Kubernetes binaries for the version
 	// vates-node.yaml asks for, so it is identical on every node and in the
@@ -406,14 +404,15 @@ func startAPI() {
 	}
 }
 
-// startGuestAgent brings up the Xen guest agent: the OS-identification script
-// first -- it writes the cache xe-daemon reads, and without it Xen Orchestra
-// shows no OS for the VM -- then the daemon itself.
+// startGuestAgent brings up the Xen guest agent: the Rust `xen-guest-agent`,
+// which detects the OS itself and publishes to XenStore, one process. (The Go
+// xe-guest-utilities it replaces needed a separate xe-linux-distribution run and
+// an OS cache first.)
 //
-// Best effort, and a no-op off Xen: /proc/xen/xenbus only exists in a Xen guest,
-// and the daemon logs and exits at once elsewhere (the libvirt test cluster).
-// The daemon is a supervised child, so the SIGTERM a clean shutdown sends to
-// every child reaches it.
+// Best effort, and a no-op off Xen: the agent writes to XenStore, which only
+// exists in a Xen guest, and it would exit at once elsewhere (the libvirt test
+// cluster). The daemon is a supervised child, so the SIGTERM a clean shutdown
+// sends to every child reaches it.
 func startGuestAgent() {
 	// /proc/xen exists only in a Xen guest: CONFIG_XEN_COMPAT_XENFS creates it
 	// when the kernel has detected the hypervisor. Off Xen -- the libvirt test
@@ -422,22 +421,15 @@ func startGuestAgent() {
 	if _, err := os.Stat("/proc/xen"); err != nil {
 		return
 	}
-	if _, err := os.Stat(pid1XeDaemon); err != nil {
-		kmsg("xe-daemon: %s: %v", pid1XeDaemon, err)
+	if _, err := os.Stat(pid1XenGuestAgent); err != nil {
+		kmsg("xen-guest-agent: %s: %v", pid1XenGuestAgent, err)
 		return
 	}
-	// /var/cache is a symlink to /tmp in the rootfs, which the /var partition
-	// mount hides; on the partition itself the directory has to be created.
-	if err := os.MkdirAll(filepath.Dir(pid1XeOSCache), 0o755); err != nil {
-		kmsg("xe-daemon: mkdir %s: %v", filepath.Dir(pid1XeOSCache), err)
-	}
-	if _, err := os.Stat(pid1XeDistroInfo); err == nil {
-		if out, err := exec.Command(pid1XeDistroInfo, pid1XeOSCache).CombinedOutput(); err != nil {
-			kmsg("xe-linux-distribution: %v (%s)", err, strings.TrimSpace(string(out)))
-		}
-	}
-	if err := startChild("xe-daemon", pid1XeDaemon); err != nil {
-		kmsg("xe-daemon: %v", err)
+	// --stderr: the agent logs to syslog by default, and the node runs no syslog
+	// daemon, so its logs would go nowhere. To stderr, they land in the child's
+	// log (/var/log/vates/xen-guest-agent.log), which `vateskctl logs` returns.
+	if err := startChild("xen-guest-agent", pid1XenGuestAgent, "--stderr"); err != nil {
+		kmsg("xen-guest-agent: %v", err)
 	}
 }
 
