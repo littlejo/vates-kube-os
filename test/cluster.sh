@@ -571,6 +571,47 @@ do_wait() {
     fi
     sleep 10
   done
+
+  # Every node Ready is not the cluster up: the kubelet reports Ready as soon as
+  # a CNI conflist exists, and a CNI whose agent socket the plugins cannot reach
+  # (a Cilium that lost its /var/run -> /run link) leaves every pod -- CoreDNS
+  # included -- in ContainerCreating while the nodes all say Ready. So the wait
+  # ends only when a pod that needs the pod network is actually Running.
+  wait_pod_network "${first}"
+}
+
+# wait_pod_network waits until at least one CoreDNS pod is Running, which is the
+# proof that the pod network programs sandboxes. `Ready` nodes are not the
+# proof: the kubelet is satisfied with a conflist on disk, and a CNI whose agent
+# socket the plugin cannot dial keeps every pod in ContainerCreating -- CoreDNS
+# among them -- with the nodes still Ready.
+#
+# CoreDNS is the pod to ask: the addons always deploy it on the control planes,
+# and it cannot start until its sandbox is programmed, so its being Running is
+# the CNI working. Polls cheaply, and on failure names the cause -- the stuck
+# pod and the CNI error in its describe -- rather than "nodes Ready".
+wait_pod_network() { # <name>
+  local name="$1" deadline=$(( $(date +%s) + 300 )) running
+  while :; do
+    running=$(host_kubectl "${name}" -n kube-system get pods -l k8s-app=kube-dns --no-headers 2>/dev/null \
+      | grep -c " Running " || true)
+    ts "CoreDNS Running: ${running}"
+    [ "${running}" -ge 1 ] && { ts "the pod network programs sandboxes (CoreDNS is Running)"; return 0; }
+    if [ "$(date +%s)" -ge "${deadline}" ]; then
+      echo "  the nodes are Ready but no pod can start; the CNI is the thing to look at:" >&2
+      host_kubectl "${name}" -n kube-system get pods -l k8s-app=kube-dns -o wide 2>&1 | sed 's/^/    /' >&2
+      local pod
+      pod=$(host_kubectl "${name}" -n kube-system get pods -l k8s-app=kube-dns \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+      if [ -n "${pod}" ]; then
+        echo "  and the CNI error from the pod's describe:" >&2
+        host_kubectl "${name}" -n kube-system describe pod "${pod}" 2>&1 \
+          | sed -n '/^Events:/,$p' | tail -14 | sed 's/^/    /' >&2
+      fi
+      die "the nodes are Ready but CoreDNS never ran; the pod network is not working"
+    fi
+    sleep 5
+  done
 }
 
 # --- status -----------------------------------------------------------------
