@@ -155,7 +155,6 @@ COPY recipes/vates /build/recipes/vates
 RUN /build/lib/run-recipe.sh vates-sysinit
 RUN /build/lib/run-recipe.sh vates-console
 RUN /build/lib/run-recipe.sh vates-api
-RUN /build/lib/run-recipe.sh vates-kubelet-run
 RUN /build/lib/run-recipe.sh vates-launcher
 
 # --- pass 4b: Xen guest agent (Rust) -----------------------------------------

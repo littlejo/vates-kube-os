@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -87,4 +88,89 @@ func TestConsoleKeepsItsDefaultWithoutADropIn(t *testing.T) {
 	if got := consoleEnv(filepath.Join(t.TempDir(), "absent.conf")); got != nil {
 		t.Errorf("consoleEnv on a missing drop-in = %v, want nil", got)
 	}
+}
+
+// TestKubeletRunArgs pins the `ctr run` command line the kubelet container is
+// started with: the flag that makes pod volumes reach the host
+// (--rootfs-propagation=rshared), the host namespaces, and the image/id/command
+// ordering `ctr run` expects.
+func TestKubeletRunArgs(t *testing.T) {
+	kubelet := []string{"/usr/local/bin/kubelet", "--config=/etc/kubelet/kubelet.conf"}
+	args := kubeletRunArgs(kubelet)
+
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"removed on exit", "--rm"},
+		{"privileged", "--privileged"},
+		{"host network", "--net-host"},
+		{"host PID namespace", "pid:/proc/1/ns/pid"},
+		{"rootfs propagation", "--rootfs-propagation=rshared"},
+		{"the kubelet root is recursively shared", "type=bind,src=/var/lib/kubelet,dst=/var/lib/kubelet,options=rbind:rshared"},
+		{"the image", firstboot.KubeletImageRef},
+		{"the container id", kubeletContainerID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !slices.Contains(args, tt.want) {
+				t.Errorf("kubeletRunArgs() is missing %q\nargs: %v", tt.want, args)
+			}
+		})
+	}
+
+	// It must run in this system's own namespace, not the CRI's.
+	if got := slices.Index(args, kubeletNamespace); got < 1 || args[got-1] != "-n" {
+		t.Errorf("the namespace %q is not passed with -n: %v", kubeletNamespace, args)
+	}
+	// `ctr run [IMAGE] ID [COMMAND ARGS...]`: the kubelet command must follow
+	// the container id, verbatim.
+	id := slices.Index(args, kubeletContainerID)
+	if id < 0 || id+1 >= len(args) || args[id+1] != kubelet[0] {
+		t.Errorf("the kubelet command must follow the container id: id=%d args=%v", id, args)
+	}
+}
+
+// TestKubeletMounts pins how each host path is mounted, and that an optional
+// mount whose source does not exist is dropped -- runc fails a bind whose
+// source is missing, which would take the whole container down.
+func TestKubeletMounts(t *testing.T) {
+	specs := kubeletMountSpecs()
+	index := make(map[string]bool, len(specs))
+	for _, s := range specs {
+		index[s] = true
+	}
+
+	tests := []struct {
+		name string
+		spec string
+	}{
+		{"the kubelet root is recursively shared", "type=bind,src=/var/lib/kubelet,dst=/var/lib/kubelet,options=rbind:rshared"},
+		{"the kubelet config is read-only", "type=bind,src=/etc/kubelet,dst=/etc/kubelet,options=rbind:ro"},
+		{"the cluster PKI is writable", "type=bind,src=/etc/kubernetes,dst=/etc/kubernetes,options=rbind"},
+		{"the binary cache is writable", "type=bind,src=/var/lib/vates/kubernetes,dst=/var/lib/vates/kubernetes,options=rbind"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !index[tt.spec] {
+				t.Errorf("mount %q is missing from %v", tt.spec, specs)
+			}
+		})
+	}
+
+	t.Run("a missing optional source is dropped", func(t *testing.T) {
+		for _, m := range kubeletContainerMounts {
+			if !m.optional {
+				continue
+			}
+			if _, err := os.Stat(m.src); err == nil {
+				continue
+			}
+			for _, s := range specs {
+				if strings.Contains(s, "src="+m.src+",") {
+					t.Errorf("optional %s has no source but was rendered: %s", m.src, s)
+				}
+			}
+		}
+	})
 }

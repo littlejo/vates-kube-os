@@ -53,7 +53,7 @@ flowchart TD
     pid1["vates-sysinit — PID 1"]
 
     pid1 --> containerd["containerd<br/>the container engine (CRI)"]
-    pid1 --> kubelet["vates-kubelet-run<br/>the kubelet"]
+    pid1 --> kubelet["kubelet<br/><small>a container, started by <code>ctr run</code></small>"]
 
     kubelet -->|"static pod manifests"| cp["control plane<br/><small>control-plane role only</small>"]
     kubelet -->|"cluster pods"| net["pod network and Services"]
@@ -99,7 +99,9 @@ flowchart TD
 6. run **configure**: read the config drive, write the kubelet's environment
    (its name, its address, the Kubernetes version, where to fetch it), and on a
    control plane generate the certificates and static pod manifests;
-7. start the **kubelet** container — whose entry point is a *launcher* that
+7. start the **kubelet** container with containerd's `ctr run` (privileged, on
+   the host network and PID namespaces, `--rootfs-propagation=rshared`, so the
+   mounts it creates reach the host) — its entry point is a *launcher* that
    fetches and verifies the requested Kubernetes binary;
 8. run **bootstrap**: cluster addons and the CNI on the first control plane,
    `kubeadm join` on a joining one, nothing on a worker;

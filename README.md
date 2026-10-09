@@ -136,7 +136,6 @@ The disk rebuilds incrementally; `distclean` starts the next build cold.
 cmd/vates-sysinit/     PID 1, the boot sequence and the first-boot configuration
 cmd/vates-console/     the machine's screen: console + dashboard
 cmd/vates-api/         the management API
-cmd/vates-kubelet-run/ starts the kubelet container under containerd
 cmd/vates-launcher/    the kubelet image: fetch/verify/exec a Kubernetes binary
 cmd/vateskctl/         the operator's CLI
 internal/sysinit/      PID 1 and the boot sequence

@@ -3,17 +3,21 @@
 The image ships **several small binaries** rather than one busybox-style
 multi-call program. The reason is measured, not stylistic: a Go program runs the
 `init()` of every package linked into it, so a single binary made *every* process
-pay for containerd's and gRPC's initialization, and the kubelet image carried the
-whole program to run one launcher.
+pay for the heaviest packages linked in, and the kubelet image carried the whole
+program to run one launcher.
 
 | Binary | Role | Faces (`argv[0]`) |
 |---|---|---|
 | `vates-sysinit` | PID 1 and the boot sequence, plus the first-boot configuration | `vates-sysinit`, `init`, `vates-init`, `vates-splash` |
 | `vates-console` | the machine's screen | `vates-console`, `vates-dashboard` |
 | `vates-api` | the management API | `vates-api` |
-| `vates-kubelet-run` | starts the kubelet container under containerd | `vates-kubelet-run` |
 | `vates-launcher` | the kubelet image: fetch, verify, cache, exec one Kubernetes binary | `vates-launcher`, `kubelet`, `kubeadm`, `kubectl`, `mounter` |
 | `vateskctl` | the operator's CLI (runs off the node) | — |
+
+There is **no kubelet-runner binary**: the kubelet container is started by
+containerd's own `ctr`, which now exposes the `--rootfs-propagation` flag the
+custom runner existed for (containerd#5381). That removed the only import of
+containerd's client library.
 
 `vates-init` and `vates-splash` are symlinks to `vates-sysinit`; `vates-dashboard`
 is a symlink to `vates-console`. `firstboot` has no binary of its own: it runs

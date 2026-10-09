@@ -56,8 +56,16 @@ const (
 	// vates-console, not vates-dashboard: it picks the graphical face when there
 	// is a DRM card and falls back to the text one otherwise. One image, both.
 	pid1Console = "/usr/local/bin/vates-console"
-	// The kubelet container runner, started as a child instead of by systemd.
-	pid1KubeletRun = "/usr/local/bin/vates-kubelet-run"
+	// The kubelet runs as a container, but it is containerd's own `ctr` that
+	// starts it now, not a custom runner: containerd#5381 is fixed and
+	// `ctr run` exposes --rootfs-propagation, so the Go runner -- and its
+	// containerd client dependency -- was removed. See docs/ARCHITECTURE.md.
+	pid1CTR = "/usr/bin/ctr"
+	// Where the kubelet container lives. The namespace and the container id are
+	// this system's own (not the CRI's "k8s.io", which is for pods); the image
+	// is imported by the build at first boot under firstboot.KubeletImageRef.
+	kubeletNamespace   = "vates"
+	kubeletContainerID = "vates-kubelet"
 	// The management API (mTLS gRPC), the thing that replaces SSH: a child of
 	// PID 1.
 	pid1API = "/usr/local/bin/vates-api"
@@ -350,14 +358,120 @@ func configureNode() {
 	kmsg("configure complete")
 }
 
-// startKubelet starts the kubelet container through the runner. Under systemd
+// kubeletContainerMount is one bind mount the kubelet container needs. It is
+// the same list the removed runner carried, expressed so `ctr run` can take it.
+type kubeletContainerMount struct {
+	src, dst string
+	// ro mounts the source read-only; shared makes it recursive-shared, which
+	// only /var/lib/kubelet needs (see kubeletRunArgs).
+	ro, shared bool
+	// optional mounts are added only when their source exists: runc fails a
+	// bind whose source is missing, and these are files a systemd machine has
+	// and this image does not.
+	optional bool
+}
+
+// kubeletContainerMounts are the host paths the kubelet container needs.
+//
+// /var/lib/kubelet is the one that must be rshared: the kubelet mounts each
+// pod's service-account token tmpfs under it, and those mounts must reach the
+// host namespace where containerd creates the pod sandboxes. See
+// docs/ARCHITECTURE.md and kubeletRunArgs.
+//
+// /etc/kubernetes is read-WRITE, unlike the others: with TLS bootstrap the
+// kubelet writes its own kubelet.conf from the certificate the API server
+// issues it.
+//
+// /etc/resolv.conf and /etc/hosts are here because the container has no
+// resolver of its own: without the host's, the launcher cannot resolve
+// dl.k8s.io and every fetch fails with "connection refused".
+//
+// /dev/kmsg is opened by the kubelet at startup; the container's /dev is a
+// fresh tmpfs that has no such node.
+var kubeletContainerMounts = []kubeletContainerMount{
+	{src: "/etc/resolv.conf", dst: "/etc/resolv.conf", ro: true, optional: true},
+	{src: "/etc/hosts", dst: "/etc/hosts", ro: true},
+	{src: "/etc/os-release", dst: "/etc/os-release", ro: true, optional: true},
+	{src: "/dev/kmsg", dst: "/dev/kmsg"},
+	{src: "/var/lib/kubelet", dst: "/var/lib/kubelet", shared: true},
+	{src: "/etc/kubernetes", dst: "/etc/kubernetes"},
+	{src: "/etc/kubelet", dst: "/etc/kubelet", ro: true},
+	{src: "/sys/fs/cgroup", dst: "/sys/fs/cgroup"},
+	{src: "/var/log", dst: "/var/log"},
+	{src: "/run/containerd", dst: "/run/containerd"},
+	// The host's /run: the kubelet creates hostPath files under it -- the
+	// /run/xtables.lock the CNI plugins lock, /run/flannel/... -- and in its
+	// own tmpfs the host path would stay missing.
+	{src: "/run", dst: "/run"},
+	{src: "/var/lib/containerd", dst: "/var/lib/containerd"},
+	{src: "/run/systemd/system", dst: "/run/systemd/system", optional: true},
+	{src: "/run/systemd/private", dst: "/run/systemd/private", optional: true},
+	{src: "/etc/machine-id", dst: "/etc/machine-id", ro: true, optional: true},
+	{src: "/var/lib/vates/kubernetes", dst: "/var/lib/vates/kubernetes"},
+}
+
+// kubeletMountSpecs renders the mounts as `ctr run --mount` values, dropping the
+// optional ones whose source is absent.
+func kubeletMountSpecs() []string {
+	specs := make([]string, 0, len(kubeletContainerMounts))
+	for _, m := range kubeletContainerMounts {
+		if m.optional {
+			if _, err := os.Stat(m.src); err != nil {
+				continue
+			}
+		}
+		opts := "rbind"
+		switch {
+		case m.shared:
+			opts = "rbind:rshared"
+		case m.ro:
+			opts = "rbind:ro"
+		}
+		specs = append(specs, fmt.Sprintf("type=bind,src=%s,dst=%s,options=%s", m.src, m.dst, opts))
+	}
+	return specs
+}
+
+// kubeletRunArgs is the `ctr run` command line for the kubelet container.
+//
+// It is privileged, on the host network and PID namespaces (the kubelet is a
+// host agent), and --rootfs-propagation=rshared is what makes a mount the
+// kubelet creates inside the container reach the host: without it the rootfs
+// is rslave, the bind of /var/lib/kubelet lands in a shared peer group of its
+// own, and no pod can read its service-account token (measured; containerd#5381
+// and runc#5390).
+//
+// kubelet is the full kubelet argv, [program, flags...]: everything after the
+// container id is the command `ctr run` executes in the image.
+func kubeletRunArgs(kubelet []string) []string {
+	args := []string{
+		"-n", kubeletNamespace, "run", "--rm",
+		"--privileged",
+		"--net-host",
+		"--with-ns", "pid:/proc/1/ns/pid",
+		"--rootfs-propagation=rshared",
+		"--env", "KUBERNETES_VERSION=" + os.Getenv("KUBERNETES_VERSION"),
+		"--env", "KUBERNETES_BINARY_BASE=" + os.Getenv("KUBERNETES_BINARY_BASE"),
+	}
+	for _, spec := range kubeletMountSpecs() {
+		args = append(args, "--mount", spec)
+	}
+	args = append(args, firstboot.KubeletImageRef, kubeletContainerID)
+	return append(args, kubelet...)
+}
+
+// startKubelet starts the kubelet container, as a child of PID 1. Under systemd
 // this was k8s-kubelet.service; under PID 1 it is a child.
 func startKubelet() {
-	if _, err := os.Stat(pid1KubeletRun); err != nil {
-		kmsg("kubelet: %s: %v", pid1KubeletRun, err)
+	if _, err := os.Stat(pid1CTR); err != nil {
+		kmsg("kubelet: %s: %v", pid1CTR, err)
 		return
 	}
-	if err := startChild("kubelet", pid1KubeletRun, kubeletArgs()...); err != nil {
+	// A container or its snapshot left by a kill that skipped `--rm` makes the
+	// start below fail ("snapshot ... already exists"). Remove it first; there
+	// is nothing to keep. Best-effort: on a first boot there is none.
+	_ = exec.Command(pid1CTR, "-n", kubeletNamespace, "containers", "rm", kubeletContainerID).Run()
+	if err := startChild("kubelet", pid1CTR, kubeletRunArgs(kubeletArgs())...); err != nil {
 		kmsg("kubelet: %v", err)
 	}
 }
