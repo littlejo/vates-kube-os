@@ -7,9 +7,10 @@ together. Read it top to bottom, or stop wherever you have what you need.
 ## What it is
 
 An **immutable** image, built from pinned upstream sources: glibc, **no
-systemd, no SELinux, no package manager**. Every Kubernetes component runs as a
-container, and the init process (PID 1) is this project's own binary,
-`vates-sysinit`.
+systemd, no SELinux, no package manager**. Its only job is to run
+**Kubernetes**: the kubelet is a **host process** started by PID 1, every
+workload and every control-plane component is a container, and the init process
+(PID 1) is this project's own binary, `vates-sysinit`.
 
 Two ideas carry the whole design:
 
@@ -53,7 +54,7 @@ flowchart TD
     pid1["vates-sysinit — PID 1"]
 
     pid1 --> containerd["containerd<br/>the container engine (CRI)"]
-    pid1 --> kubelet["kubelet<br/><small>a container, started by <code>ctr run</code></small>"]
+    pid1 --> kubelet["kubelet<br/><small>a host process, fetched by the launcher</small>"]
 
     kubelet -->|"static pod manifests"| cp["control plane<br/><small>control-plane role only</small>"]
     kubelet -->|"cluster pods"| net["pod network and Services"]
@@ -68,7 +69,7 @@ flowchart TD
     net --> kproxy["kube-proxy"]
 ```
 
-The important part: **PID 1 starts a single container, the kubelet.** The
+The important part: **PID 1 starts the kubelet as a host process**, and the
 kubelet then starts everything else through containerd — the control plane from
 static pod manifests, the rest as ordinary cluster workloads.
 
@@ -83,26 +84,24 @@ flowchart TD
     mounts --> sysctl["apply /etc/sysctl.d"]
     sysctl --> shared["/ as a recursive-shared mount"]
     shared --> splash["draw the boot screen, start containerd"]
-    splash --> net["eth0 up, DHCP lease,<br/>import the kubelet image"]
+    splash --> net["eth0 up, DHCP lease"]
     net --> configure["configure<br/>read the config drive, write the kubelet files"]
-    configure --> kubelet["start the kubelet container<br/>its launcher fetches the binary"]
+    configure --> kubelet["start the kubelet<br/>its launcher fetches the binary"]
     kubelet --> bootstrap["bootstrap<br/>addons + CNI, or join the cluster"]
     bootstrap --> api["start the management API,<br/>hand the screen to the console"]
 ```
 
 1. mount the pseudo filesystems and the cgroup v2 hierarchy;
 2. apply `/etc/sysctl.d` (`ip_forward`, the bridge sysctls);
-3. make `/` a recursive-shared mount, so the kubelet container's mounts reach
-   the host;
+3. make `/` a recursive-shared mount, as systemd does at boot;
 4. draw the boot screen and start **containerd**;
-5. bring `eth0` up, take a DHCP lease, import the kubelet image;
+5. bring `eth0` up and take a DHCP lease;
 6. run **configure**: read the config drive, write the kubelet's environment
    (its name, its address, the Kubernetes version, where to fetch it), and on a
    control plane generate the certificates and static pod manifests;
-7. start the **kubelet** container with containerd's `ctr run` (privileged, on
-   the host network and PID namespaces, `--rootfs-propagation=rshared`, so the
-   mounts it creates reach the host) — its entry point is a *launcher* that
-   fetches and verifies the requested Kubernetes binary;
+7. start the **kubelet** as a host process — `/usr/local/bin/kubelet` is a
+   *launcher* that fetches and verifies the requested Kubernetes binary, then
+   execs it;
 8. run **bootstrap**: cluster addons and the CNI on the first control plane,
    `kubeadm join` on a joining one, nothing on a worker;
 9. start the **management API** and hand the screen to the console.
@@ -112,12 +111,12 @@ flowchart TD
 | Piece | Role | Started by |
 |---|---|---|
 | `containerd` | container engine (CRI) | PID 1 |
-| `kubelet` | the node agent | PID 1, in a container |
+| `kubelet` | the node agent | PID 1 (host process) |
 | `etcd`, `kube-apiserver`, `kube-controller-manager`, `kube-scheduler` | control plane | kubelet (static pods) |
 | `kube-vip` | holds the control plane's virtual address | kubelet (static pod) |
 | `flannel` / `kube-proxy` | pod network and Service rules | kubelet |
 | `vates-sysinit` | PID 1, the boot sequence | the kernel |
-| `vates-launcher` | fetch, verify and run a Kubernetes binary | in the kubelet container |
+| `vates-launcher` | fetch, verify and run a Kubernetes binary | the kubelet, kubeadm and kubectl (on the host) |
 | `vates-api` | the management API | PID 1 |
 | `vates-console` | the machine's screen | PID 1 |
 
@@ -179,10 +178,12 @@ clusters and a few deployment choices; the schema is in
 
 ## One image, any Kubernetes version
 
-The image embeds no Kubernetes binary. It carries a **launcher**; at first boot
-the node reads `kubernetes.version` from the document, fetches the binary,
-verifies the published digest, caches it under `/var`, and runs it. Binaries
-live in `/var` — the mutable half — which is exactly the immutability split.
+The image embeds no Kubernetes binary. The host carries a **launcher**
+(`/usr/local/bin/kubelet`, `kubeadm`, `kubectl`, `mounter` are all symlinks to
+it); at first boot the node reads `kubernetes.version` from the document, fetches
+the binary, verifies the published digest, caches it under `/var`, and runs it.
+Binaries live in `/var` — the mutable half — which is exactly the immutability
+split.
 
 The **configuration** supports `v1.31` and newer, with **no upper bound**: the
 floor is kubeadm's configuration API (`v1beta4` from 1.31), and a version below it

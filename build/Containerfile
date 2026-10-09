@@ -19,7 +19,7 @@
 #   pass  3  tools    : busybox, util-linux, e2fsprogs, ...
 #   pass  4  console  : freetype -> fontconfig -> glib -> cairo -> harfbuzz -> pango
 #   pass  1  kernel   : linux + kernel.fragment
-#   pass  6  assemble : systemd-boot, kubelet image, genimage (the assembler)
+#   pass  6  assemble : systemd-boot, genimage (the assembler)
 #
 # /sysroot is the staging tree: the libc pass seeds it, every recipe installs
 # into it with DESTDIR, and every compile points at it with --sysroot.
@@ -179,9 +179,8 @@ COPY dl/xen-guest-agent-6acc719.tar.gz /src/dl/
 RUN /build/lib/run-recipe.sh xen-guest-agent
 
 # --- pass 5: container runtime ----------------------------------------------
-# containerd, runc and the CNI plugins, from upstream release artifacts. Only
-# what Kubernetes needs to run: the kubelet image, built in the disk stage, is
-# imported into containerd at first boot.
+# containerd, runc and the CNI plugins, from upstream release artifacts. What
+# Kubernetes needs to run the pods and the control plane.
 FROM console AS runtime
 # The Mozilla CA bundle, pinned by sha. containerd pulls the Kubernetes images
 # over TLS and the launcher fetches binaries over TLS; without it both fail with
@@ -230,8 +229,6 @@ COPY --from=guest /sysroot/usr/lib/libxentoolcore.so.1* /sysroot/usr/lib/
 COPY --from=guest /sysroot/usr/lib/libxentoollog.so.1* /sysroot/usr/lib/
 # The guest components' license texts (the curated notices ride the overlay).
 COPY --from=guest /sysroot/usr/share/licenses /sysroot/usr/share/licenses
-COPY lib/build-kubelet-image.sh /build/lib/build-kubelet-image.sh
-RUN bash /build/lib/build-kubelet-image.sh
 COPY genimage.cfg /build/genimage.cfg
 COPY context /build/context
 COPY recipes/host/libconfuse.sh /build/recipes/host/libconfuse.sh

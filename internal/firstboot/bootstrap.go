@@ -141,8 +141,6 @@ func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths,
 		return nil
 	}
 
-	image := KubeletImageRef
-
 	// A control plane that JOINED finishes here, not by applying addons: the
 	// cluster already has them. What is left is to promote this machine's etcd
 	// member from learner to voter, which could only happen once its own etcd was
@@ -158,14 +156,14 @@ func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths,
 		if err := waitForEndpoint(cfg.Cluster.ControlPlaneEndpoint, BootstrapTimeout, r); err != nil {
 			return err
 		}
-		if err := joinControlPlane(image, nodeName, r); err != nil {
+		if err := joinControlPlane(nodeName, r); err != nil {
 			return err
 		}
 		return stageJoiningKubeVIP(cfg, nodeIP, r)
 	}
 
 	r.Progress("waiting for the API server")
-	if err := waitForAPI(image, BootstrapTimeout, r); err != nil {
+	if err := waitForAPI(BootstrapTimeout, r); err != nil {
 		return err
 	}
 	r.Progress("applying the cluster configuration")
@@ -188,7 +186,7 @@ func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths,
 	phasesStart := time.Now()
 	for _, phase := range bootstrapPhases(cfg) {
 		start := time.Now()
-		args := KubeadmPhaseCommand(image, phase)
+		args := KubeadmPhaseCommand(phase)
 		if _, err := r.Run(args[0], args[1:]...); err != nil {
 			return fmt.Errorf("kubeadm phase %q: %w", phase, err)
 		}
@@ -204,7 +202,7 @@ func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths,
 	if cfg.CNI.Plugin == vatescfg.CNIFlannel {
 		r.Progress("applying the pod network")
 		start := time.Now()
-		apply := kubectlArgs(image, "--kubeconfig="+SuperAdminKubeconfig,
+		apply := kubectlArgs("--kubeconfig="+SuperAdminKubeconfig,
 			"apply", "-f", FlannelManifestPath)
 		if _, err := r.Run(apply[0], apply[1:]...); err != nil {
 			return fmt.Errorf("applying the CNI manifest: %w", err)
@@ -223,7 +221,7 @@ func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths,
 	}
 	r.Progress("granting the console read access")
 	grantStart := time.Now()
-	grant := kubectlArgs(image, "--kubeconfig="+SuperAdminKubeconfig,
+	grant := kubectlArgs("--kubeconfig="+SuperAdminKubeconfig,
 		"apply", "-f", NodeDashboardRBACPath)
 	if _, err := r.Run(grant[0], grant[1:]...); err != nil {
 		return fmt.Errorf("applying the dashboard RBAC: %w", err)
@@ -238,7 +236,7 @@ func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths,
 	// the cluster's admin kubeconfig, the same as the CNI and the RBAC above.
 	for i, m := range cfg.Cloud.Manifests {
 		r.Progress(fmt.Sprintf("applying the cloud manifests (%d/%d)", i+1, len(cfg.Cloud.Manifests)))
-		apply := kubectlArgs(image, "--kubeconfig="+SuperAdminKubeconfig, "apply", "-f", m)
+		apply := kubectlArgs("--kubeconfig="+SuperAdminKubeconfig, "apply", "-f", m)
 		if _, err := r.Run(apply[0], apply[1:]...); err != nil {
 			return fmt.Errorf("applying cloud.manifests[%d] (%s): %w", i, m, err)
 		}
@@ -266,8 +264,8 @@ func bootstrapStage(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths,
 // idempotent, so running the join again finds the member already announced, the
 // manifests already written and etcd running, and the promotion succeeds.
 // Bounded, and the last error is reported.
-func joinControlPlane(image, nodeName string, r Runner) error {
-	args := JoinControlPlaneCommand(image)
+func joinControlPlane(nodeName string, r Runner) error {
+	args := JoinControlPlaneCommand()
 	start := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= JoinAttempts; attempt++ {
@@ -282,10 +280,10 @@ func joinControlPlane(image, nodeName string, r Runner) error {
 			// Wait for this node's OWN API server to report ready -- /readyz
 			// includes the etcd check -- so the control plane is not called
 			// done while its etcd is still a learner.
-			if err := waitForJoinedControlPlane(image, r); err != nil {
+			if err := waitForJoinedControlPlane(r); err != nil {
 				r.Logf("%v; continuing, the join itself succeeded", err)
 			}
-			return markControlPlane(image, nodeName, r)
+			return markControlPlane(nodeName, r)
 		}
 		lastErr = err
 		r.Logf("kubeadm join attempt %d did not complete: %v", attempt, err)
@@ -317,9 +315,9 @@ const JoinedControlPlaneReadyTimeout = 90 * time.Second
 // Best-effort: the join has already succeeded, so returning an error here would
 // turn a working control plane into a failed bootstrap over a slow disk. A
 // timeout is reported and the caller continues.
-func waitForJoinedControlPlane(image string, r Runner) error {
+func waitForJoinedControlPlane(r Runner) error {
 	deadline := time.Now().Add(JoinedControlPlaneReadyTimeout)
-	args := kubectlArgs(image, "--kubeconfig=/etc/kubernetes/admin.conf", "get", "--raw", "/readyz")
+	args := kubectlArgs("--kubeconfig=/etc/kubernetes/admin.conf", "get", "--raw", "/readyz")
 	for {
 		out, err := r.Run(args[0], args[1:]...)
 		if err == nil && strings.Contains(string(out), "ok") {
@@ -359,8 +357,8 @@ var (
 //
 // The phase is retried until the node carries node-role.kubernetes.io/control-plane,
 // because the phase itself reports success even when it found no node to mark.
-func markControlPlane(image, nodeName string, r Runner) error {
-	args := MarkControlPlaneCommand(image)
+func markControlPlane(nodeName string, r Runner) error {
+	args := MarkControlPlaneCommand()
 	var lastErr error
 	for attempt := 1; attempt <= markAttempts; attempt++ {
 		r.Progress("marking the node as a control plane")
@@ -386,7 +384,7 @@ func markControlPlane(image, nodeName string, r Runner) error {
 // label. The label's VALUE is empty, so its presence is what is checked: a
 // jsonpath on the value cannot tell "" from absent.
 func hasControlPlaneLabel(nodeName string, r Runner) bool {
-	args := kubectlArgs(KubeletImageRef, "--kubeconfig="+AdminKubeconfig,
+	args := kubectlArgs("--kubeconfig="+AdminKubeconfig,
 		"get", "node", nodeName, "-o", "jsonpath={.metadata.labels}")
 	out, err := r.Run(args[0], args[1:]...)
 	return err == nil && strings.Contains(string(out), "node-role.kubernetes.io/control-plane")
@@ -425,10 +423,10 @@ func stageJoiningKubeVIP(cfg *vatescfg.Config, nodeIP string, r Runner) error {
 // It polls through kubectl from the same image the control plane runs from, with
 // the same kubeconfig kube-vip uses, so it exercises exactly the path everything
 // else will: the endpoint from vates-node.yaml, reached through the VIP.
-func waitForAPI(image string, timeout time.Duration, r Runner) error {
+func waitForAPI(timeout time.Duration, r Runner) error {
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
-	args := kubectlArgs(image, "--kubeconfig="+SuperAdminKubeconfig, "get", "--raw", "/healthz")
+	args := kubectlArgs("--kubeconfig="+SuperAdminKubeconfig, "get", "--raw", "/healthz")
 
 	for attempt := 0; ; attempt++ {
 		out, err := r.Run(args[0], args[1:]...)
@@ -442,7 +440,8 @@ func waitForAPI(image string, timeout time.Duration, r Runner) error {
 			return fmt.Errorf("the API server did not answer within %s\n"+
 				"  Its address is the control plane endpoint in vates-node.yaml, reached\n"+
 				"  through the VIP. If the VIP is not up, kube-vip is the thing to look\n"+
-				"  at: ctr -n k8s.io containers list, then the pod's log under /var/log/pods",
+				"  at: kubectl -n kube-system get pod -l k8s-app=kube-vip, and its log\n"+
+				"  under /var/log/pods",
 				timeout)
 		}
 		if attempt == 0 {
@@ -452,16 +451,7 @@ func waitForAPI(image string, timeout time.Duration, r Runner) error {
 	}
 }
 
-// kubectlArgs builds a ctr command that runs kubectl from the Kubernetes image,
-// with the cluster's configuration visible to it.
-func kubectlArgs(image string, args ...string) []string {
-	base := withMounts(
-		ctrBase(false),
-		ctrMount(filepath.Dir(SuperAdminKubeconfig), filepath.Dir(SuperAdminKubeconfig), true),
-	)
-	// kubectl is fetched like the rest of the Kubernetes binaries; the cache and
-	// the version travel with every call so the container can find or fetch it.
-	base = append(base, binarySourceArgs()...)
-	base = append(base, image, ctrContainerID("kubectl"), "/usr/local/bin/kubectl")
-	return append(base, args...)
+// kubectlArgs runs the node's kubectl, through the launcher.
+func kubectlArgs(args ...string) []string {
+	return append([]string{KubectlPath}, args...)
 }

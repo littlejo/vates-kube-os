@@ -73,22 +73,17 @@ func Configure(opts ConfigureOptions) error {
 				fmt.Println("  from vates-bootstrap, once this node's kubelet is running, etcd can start")
 				fmt.Println("  and its etcd member can catch up:")
 				fmt.Printf("    %s\n",
-					strings.Join(JoinControlPlaneCommand(KubeadmImage(cfg.Kubernetes.Version)), " "))
+					strings.Join(JoinControlPlaneCommand(), " "))
 			} else {
 				for _, phase := range KubeadmPhases {
 					fmt.Printf("    %s\n",
-						strings.Join(KubeadmPhaseCommand(KubeadmImage(cfg.Kubernetes.Version), phase), " "))
+						strings.Join(KubeadmPhaseCommand(phase), " "))
 				}
 				fmt.Println("  (a bootstrapping master generates its own certificate authority here)")
 			}
 		}
-		fmt.Printf("\n  systemctl daemon-reload   (so the kubelet drop-in is read)\n")
-		fmt.Printf("  (the kubelet image %s is already the one the unit names,\n",
-			KubeletImageRef)
-		fmt.Printf("   and its launcher fetches Kubernetes %s on first start)\n",
-			cfg.Kubernetes.Version)
-		fmt.Println("  then k8s-node.target, which is enabled at boot and Requires this unit,")
-		fmt.Println("  starts the kubelet.")
+		fmt.Println("\n  then PID 1 starts the kubelet, whose launcher")
+		fmt.Printf("  fetches Kubernetes %s on its first run.\n", cfg.Kubernetes.Version)
 		return nil
 	}
 

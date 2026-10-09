@@ -80,8 +80,8 @@ make image
 
 `make image` runs `build/build.sh disk`: a `Containerfile` driven by podman that
 fetches every component from its upstream source (pinned by sha256 in
-`build/pins.conf`), builds the C library, the userspace, the kernel, systemd-boot
-and the kubelet image **inside the build**, then lays down the GPT disk with
+`build/pins.conf`), builds the C library, the userspace, the kernel and
+systemd-boot **inside the build**, then lays down the GPT disk with
 genimage. The disk lands in `build/out/` as `vates.qcow2` and `vates.vhd`. The
 first build is long (it compiles glibc, the kernel and the console stack); later
 ones are incremental, and adding a component does not rebuild the toolchain.
@@ -136,7 +136,7 @@ The disk rebuilds incrementally; `distclean` starts the next build cold.
 cmd/vates-sysinit/     PID 1, the boot sequence and the first-boot configuration
 cmd/vates-console/     the machine's screen: console + dashboard
 cmd/vates-api/         the management API
-cmd/vates-launcher/    the kubelet image: fetch/verify/exec a Kubernetes binary
+cmd/vates-launcher/    fetch/verify/exec a Kubernetes binary (kubelet, kubeadm, kubectl)
 cmd/vateskctl/         the operator's CLI
 internal/sysinit/      PID 1 and the boot sequence
 internal/firstboot/    configuring the node: kubeadm, kube-vip, the files to write

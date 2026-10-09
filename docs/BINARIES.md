@@ -3,21 +3,21 @@
 The image ships **several small binaries** rather than one busybox-style
 multi-call program. The reason is measured, not stylistic: a Go program runs the
 `init()` of every package linked into it, so a single binary made *every* process
-pay for the heaviest packages linked in, and the kubelet image carried the whole
-program to run one launcher.
+pay for the heaviest packages linked in.
 
 | Binary | Role | Faces (`argv[0]`) |
 |---|---|---|
 | `vates-sysinit` | PID 1 and the boot sequence, plus the first-boot configuration | `vates-sysinit`, `init`, `vates-init`, `vates-splash` |
 | `vates-console` | the machine's screen | `vates-console`, `vates-dashboard` |
 | `vates-api` | the management API | `vates-api` |
-| `vates-launcher` | the kubelet image: fetch, verify, cache, exec one Kubernetes binary | `vates-launcher`, `kubelet`, `kubeadm`, `kubectl`, `mounter` |
+| `vates-launcher` | fetch, verify, cache and exec one Kubernetes binary | `vates-launcher`, `kubelet`, `kubeadm`, `kubectl`, `mounter` |
 | `vateskctl` | the operator's CLI (runs off the node) | — |
 
-There is **no kubelet-runner binary**: the kubelet container is started by
-containerd's own `ctr`, which now exposes the `--rootfs-propagation` flag the
-custom runner existed for (containerd#5381). That removed the only import of
-containerd's client library.
+The four Kubernetes names are symlinks to `vates-launcher`, on the host: the
+kubelet, kubeadm, kubectl and mounter are not in the image, the launcher fetches
+them at first boot for the version `vates-node.yaml` asks for and execs them. So
+there is **no kubelet-runner binary either**: with the kubelet as a host process,
+nothing has to carry containerd's client library any more.
 
 `vates-init` and `vates-splash` are symlinks to `vates-sysinit`; `vates-dashboard`
 is a symlink to `vates-console`. `firstboot` has no binary of its own: it runs
@@ -27,9 +27,8 @@ once, in process, inside `vates-sysinit`.
 
 On the long-running faces (`vates-sysinit`, `vates-console`, `vates-api`), the
 split drops the non-shareable memory from ~3.5 MB to ~1.7 MB per process — about
-**1.7 MB each** — and the kubelet image's binary goes from ~20 MB to under 6 MB.
-That image is imported into containerd on every node at first boot, so the
-saving is paid on every machine.
+**1.7 MB each**. The host carries the launcher (5.9 MB) instead of the whole
+multi-call program.
 
 The split also draws a boundary by construction: PID 1 no longer carries gRPC,
 TLS and protobuf; the API no longer carries containerd, the renderers and the boot

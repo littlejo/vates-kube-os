@@ -55,14 +55,14 @@ rm -f "${BIN}/lscpu" "${BIN}/lsns" "${BIN}/lslocks" "${BIN}/lsirq" \
 
 # The real (non-symlink) binaries nothing on the node calls: `vates` and the
 # container runtime are the only code that runs, and every name below was checked
-# against the exec calls in cmd/ and internal/, the embedded firstboot templates
-# and lib/build-kubelet-image.sh. util-linux, iproute2, fdisk and pango ship
+# against the exec calls in cmd/ and internal/ and the embedded firstboot
+# templates. util-linux, iproute2, fdisk and pango ship
 # their whole tool set, so they are removed here, from every directory.
 #
 # Kept, and the reason: blkid (config drive, growing /var), mount/umount (config
-# drive, the kubelet image), ip (lo/eth0, CNI), sgdisk and resize2fs (growing
-# /var). The xtables multi-calls stay too: the kubelet image copies them and one
-# of them is the `iptables` the CNI plugins exec.
+# drive), ip (lo/eth0, CNI), sgdisk and resize2fs (growing
+# /var). The xtables multi-calls stay too: the CNI plugins exec one
+# of them as `iptables`.
 DEAD_BINS='
 	blkdiscard blkpr blkzone blockdev bridge bits chcpu choom col colcrt
 	colrm column ctrlaltdel dmesg enosys exch fadvise fdisk findfs findmnt
