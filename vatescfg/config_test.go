@@ -1,6 +1,8 @@
 package vatescfg
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -120,6 +122,81 @@ func TestLoadAcceptsCilium(t *testing.T) {
 	}
 	if c.CNI.Plugin != CNICilium {
 		t.Errorf("cni.plugin = %q, want %q", c.CNI.Plugin, CNICilium)
+	}
+}
+
+// The bootstrap path of the feature: a MASTER document with cilium is the one
+// a provider writes for a cluster that wants the second CNI, and it must
+// validate with no other change.
+func TestLoadAcceptsMasterWithCilium(t *testing.T) {
+	doc := strings.Replace(baseMaster, "plugin: flannel", "plugin: cilium", 1)
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load() rejected a master with cni.plugin: cilium: %v", err)
+	}
+	if c.CNI.Plugin != CNICilium {
+		t.Errorf("cni.plugin = %q, want %q", c.CNI.Plugin, CNICilium)
+	}
+}
+
+func TestLoadDefaultsTheCNIOnTheMaster(t *testing.T) {
+	// The default is role-independent: the common case is a MASTER document
+	// (a provider that creates a cluster) that omits cni.plugin, and it must
+	// come back flannel exactly as the worker one does.
+	doc := strings.Replace(baseMaster, "  plugin: flannel\n", "", 1)
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load() rejected a master document without cni.plugin: %v", err)
+	}
+	if c.CNI.Plugin != CNIFlannel {
+		t.Errorf("cni.plugin = %q, want the default %q", c.CNI.Plugin, CNIFlannel)
+	}
+}
+
+// The example document that ships in the image and that a provider copies as
+// its starting point must keep validating: it is a second definition of the
+// schema, and the two can drift (a key renamed here, not there) without any
+// other test noticing.
+func TestImageExampleDocumentStillValidates(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "image", "config", "vates-node.yaml"))
+	if err != nil {
+		t.Fatalf("reading the example document: %v", err)
+	}
+	c, err := Load(doc)
+	if err != nil {
+		t.Fatalf("Load() rejected image/config/vates-node.yaml: %v", err)
+	}
+	if c.CNI.Plugin != CNIFlannel {
+		t.Errorf("the example document's cni.plugin = %q, want the default %q", c.CNI.Plugin, CNIFlannel)
+	}
+}
+
+// A mirror rule rewrites cilium's images like every other: the host is
+// replaced, the path and the pin (tag AND digest) survive, so a mirror cannot
+// silently serve a different build of the tag.
+func TestImageForRewritesCiliumHosts(t *testing.T) {
+	doc := baseWorker + `
+registry:
+  mirrors:
+    - host: quay.io
+      replace: "harbor.vates.local/mirror/quay.io"
+`
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("the document with a quay.io mirror does not validate: %v", err)
+	}
+	cases := map[string]string{
+		// The agent and operator pins as firstboot carries them.
+		"quay.io/cilium/cilium:v1.20.1@sha256:ae9ea21f7427fe24bc6ea7247eb552157a1b0a431744045d3f641545ca71d11b":           "harbor.vates.local/mirror/quay.io/cilium/cilium:v1.20.1@sha256:ae9ea21f7427fe24bc6ea7247eb552157a1b0a431744045d3f641545ca71d11b",
+		"quay.io/cilium/operator-generic:v1.20.1@sha256:6c3885fc7b629099fdbe2a5c87869c86feb825fa18fae299eac0f61918d16ecf": "harbor.vates.local/mirror/quay.io/cilium/operator-generic:v1.20.1@sha256:6c3885fc7b629099fdbe2a5c87869c86feb825fa18fae299eac0f61918d16ecf",
+		// A host that merely STARTS with the rule's host is a different
+		// registry and must be left alone.
+		"quay.io.evil.example/thing:v1": "quay.io.evil.example/thing:v1",
+	}
+	for in, want := range cases {
+		if got := c.ImageFor(in); got != want {
+			t.Errorf("ImageFor(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

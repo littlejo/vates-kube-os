@@ -2,6 +2,7 @@ package firstboot
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -833,6 +834,92 @@ func TestBootstrapAppliesTheCNITheNodeInstalls(t *testing.T) {
 	}
 }
 
+// The write and the apply are two moments that must not separate. The manifest
+// is written to disk BEFORE the kubeadm phases run so that a failed addon phase
+// leaves the file on disk, and it is applied AFTER them so that the API is up
+// to receive it. If the two reorder -- the apply first, the write later -- the
+// apply fails against a file that does not exist yet, and the failure it
+// reports names the file rather than the ordering that is really wrong.
+func TestBootstrapWritesTheCNIBeforeApplyingIt(t *testing.T) {
+	for _, tc := range []struct{ name, doc string }{
+		{"flannel", masterDoc},
+		{"cilium", ciliumMasterDoc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := tc.doc
+			r := &fakeRunner{healthz: true}
+			if err := Bootstrap(loadConfig(t, doc), bareDrive(t, doc), testPaths(t), "vates-cp-1", "192.168.122.50", r); err != nil {
+				t.Fatalf("Bootstrap() failed: %v", err)
+			}
+			var manifest string
+			for _, w := range r.writes {
+				if w == FlannelManifestPath || w == CiliumManifestPath {
+					manifest = w
+				}
+			}
+			if manifest == "" {
+				t.Fatal("Bootstrap() wrote no CNI manifest")
+			}
+			// The apply command names the manifest; find it in the command log
+			// and make sure a kubeadm phase ran after the write -- which is
+			// where the CNI apply must come from, after the phases.
+			var applied bool
+			for _, c := range r.commands {
+				if strings.Contains(c, "apply -f "+manifest) {
+					applied = true
+				}
+			}
+			if !applied {
+				t.Fatalf("Bootstrap() never applied %s", manifest)
+			}
+			// The kubeadm phases must sit between the API wait and the apply:
+			// the CNI is applied to a cluster whose addons already exist.
+			var phases, cniApply int
+			for i, c := range r.commands {
+				if strings.Contains(c, "kubeadm init phase ") {
+					phases++
+					continue
+				}
+				if strings.Contains(c, "apply -f "+manifest) {
+					cniApply = i
+				}
+			}
+			if phases == 0 {
+				t.Fatalf("Bootstrap() ran no kubeadm phase: %v", r.commands)
+			}
+			if cniApply == 0 {
+				t.Fatalf("the CNI apply was not found in the command log")
+			}
+			// All the phases run before the CNI apply: if one ran after, the
+			// apply went to a cluster that was not finished yet.
+			for i, c := range r.commands {
+				if i > cniApply && strings.Contains(c, "kubeadm init phase ") {
+					t.Errorf("kubeadm phase %q runs after the CNI apply; the CNI must be applied to a finished cluster", c)
+				}
+			}
+		})
+	}
+}
+
+// A failure to apply the CNI manifest must fail the bootstrap (so the node
+// reports it, rather than staying silently NotReady with no file to read) and
+// must not write the done marker (so the next boot retries the stage whole).
+func TestBootstrapFailureToApplyTheCNIIsReported(t *testing.T) {
+	r := &fakeRunner{healthz: true, failOn: "apply -f " + FlannelManifestPath}
+	err := Bootstrap(loadConfig(t, masterDoc), bareDrive(t, masterDoc), testPaths(t), "vates-cp-1", "192.168.122.50", r)
+	if err == nil {
+		t.Fatal("Bootstrap() succeeded when applying the CNI manifest failed")
+	}
+	if !strings.Contains(err.Error(), "applying the CNI manifest") {
+		t.Errorf("the error does not name the CNI apply: %v", err)
+	}
+	for _, w := range r.writes {
+		if w == BootstrapDoneMarker {
+			t.Errorf("Bootstrap() wrote %s although applying the CNI failed; a reboot would skip a half-finished bootstrap", w)
+		}
+	}
+}
+
 // The two CNIs are the same field, cni.cidr, told to two different readers:
 // flannel is given the range in its manifest, cilium reads it from the node's
 // podCIDR annotation, which kubeadm writes from the same field. This is what
@@ -858,13 +945,178 @@ func TestCiliumManifestRendersPinnedAndAdapted(t *testing.T) {
 		// A single bootstrap node cannot run the chart's two-operator
 		// anti-affinity.
 		"replicas: 1",
+		// The node's own CNI configuration: the agent writes 05-cilium.conflist
+		// (which sorts ahead of the image's 10-flannel.conf) and the
+		// cni-exclusive flag whiteouts the flannel conf on cilium nodes.
+		"write-cni-conf-when-ready: /host/etc/cni/net.d/05-cilium.conflist",
+		"cni-exclusive: \"true\"",
+		// The podCIDR annotation is the pod network; it is written by kubeadm
+		// from cni.cidr and may lag a node that joins mid-rename, so the agent
+		// must not require it to be present at startup.
+		"k8s-require-ipv4-pod-cidr: \"false\"",
+		// The agent runs on the host network: no CNI chicken-and-egg for the
+		// DaemonSet itself.
+		"hostNetwork: true",
+		// No mesh, no observability, no external sidecar.
+		"enable-hubble: \"false\"",
+		"external-envoy-proxy: \"false\"",
+		// The ports that say the agent and operator are actually serving.
+		"hostPort: 9879",
+		"hostPort: 9234",
+		"hostPort: 9963",
 	} {
 		if !strings.Contains(string(m), want) {
 			t.Errorf("the cilium manifest does not carry\n  %s", want)
 		}
 	}
+	// The pod network is NOT in this manifest: Cilium reads it from the
+	// node's podCIDR annotation, which kubeadm writes from cni.cidr. If the
+	// CIDR ever appears in the rendered file, a second copy of the pod network
+	// has been created and the two can drift.
+	if cidr := loadConfig(t, ciliumMasterDoc).CNI.CIDR; strings.Contains(string(m), cidr) {
+		t.Errorf("the cilium manifest carries the pod CIDR %q; it must come from the node's podCIDR annotation, not from the manifest", cidr)
+	}
 	if strings.Contains(string(m), "path: /var/run") {
 		t.Error("the cilium manifest still places the hostPath state under /var/run (the image has no /var/run symlink; the state goes under /run)")
+	}
+}
+
+// The chart 1.20 ships no crds/ directory: the operator creates the
+// CustomResourceDefinitions (skipCRDCreation defaults to false) and the agent
+// waits on them. Pin the arrangement, so a future template that either
+// re-introduces CRD documents or strips the operator's create verb is caught
+// here rather than on a node whose agent sits in CrashLoopBackOff.
+func TestCiliumOperatorCreatesTheCRDs(t *testing.T) {
+	m, err := CiliumManifest(loadConfig(t, ciliumMasterDoc))
+	if err != nil {
+		t.Fatalf("CiliumManifest() failed: %v", err)
+	}
+	if strings.Contains(string(m), "kind: CustomResourceDefinition") {
+		t.Error("the cilium manifest contains CRD documents; chart 1.20 has no crds/ directory, the operator creates them")
+	}
+	if !strings.Contains(string(m), "customresourcedefinitions") || !strings.Contains(string(m), "create") {
+		t.Error("the cilium manifest no longer grants the operator create on customresourcedefinitions; the agent would wait 5 minutes on CRDs that never appear")
+	}
+}
+
+// The rendered manifest must stay a document the API server can apply:
+// parseable YAML, with exactly the objects the chart renders for this
+// configuration. The count is the assertion: adding or dropping a resource
+// (an RBAC, a Namespace, a second container) changes it.
+func TestCiliumManifestIsApplicableYAML(t *testing.T) {
+	m, err := CiliumManifest(loadConfig(t, ciliumMasterDoc))
+	if err != nil {
+		t.Fatalf("CiliumManifest() failed: %v", err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(m))
+	var kinds []string
+	n := 0
+	for {
+		var doc struct {
+			Kind string `yaml:"kind"`
+		}
+		err := dec.Decode(&doc)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("the cilium manifest is not valid YAML: %v", err)
+		}
+		n++
+		if doc.Kind != "" {
+			kinds = append(kinds, doc.Kind)
+		}
+	}
+	if n != 18 {
+		t.Errorf("the cilium manifest rendered %d documents, want 18 (the chart's agent + operator + RBAC set)", n)
+	}
+	for _, want := range []string{
+		"Namespace",
+		"DaemonSet",  // the agent
+		"Deployment", // the operator
+		"ConfigMap",  // cilium-config
+	} {
+		if !slices.Contains(kinds, want) {
+			t.Errorf("the cilium manifest has no %s document: %v", want, kinds)
+		}
+	}
+}
+
+// The pod network is one field -- cni.cidr -- and kubeadm is the thing that
+// turns it into the podCIDR annotation Cilium reads. It must reach kubeadm
+// under whichever CNI is selected: a document where the CIDR stops travelling
+// at plugin cilium would give flannel clusters a pod network and cilium
+// clusters none.
+func TestKubeadmCarriesThePodCIDRForEveryCNI(t *testing.T) {
+	for _, doc := range []string{masterDoc, ciliumMasterDoc,
+		strings.Replace(masterDoc, "plugin: flannel", "plugin: none", 1)} {
+		cfg := loadConfig(t, doc)
+		kubeadm, err := KubeadmConfig(cfg, "vates-cp-1", "192.168.122.50")
+		if err != nil {
+			t.Fatalf("KubeadmConfig() failed for %s: %v", cfg.CNI.Plugin, err)
+		}
+		if want := "podSubnet: " + cfg.CNI.CIDR; !strings.Contains(string(kubeadm), want) {
+			t.Errorf("cni.plugin: %s -- the ClusterConfiguration does not carry %q", cfg.CNI.Plugin, want)
+		}
+	}
+}
+
+// The directories the kubelet needs before it starts carry the CNI's runtime
+// state -- and only that CNI's. /run is wiped on every boot, so a missing
+// directory is a node whose kubelet container cannot mount its CNI state.
+func TestRequiredDirsCarryTheCNIState(t *testing.T) {
+	cases := []struct {
+		doc    string
+		plugin string
+		want   []string
+		absent []string
+	}{
+		{doc: masterDoc, plugin: "flannel", want: []string{"/run/flannel"}, absent: []string{"/run/cilium", "/run/netns"}},
+		{doc: ciliumMasterDoc, plugin: "cilium", want: []string{"/run/cilium", "/run/netns"}, absent: []string{"/run/flannel"}},
+		{doc: strings.Replace(masterDoc, "plugin: flannel", "plugin: none", 1), plugin: "none"},
+	}
+	for _, tc := range cases {
+		dirs := RequiredDirs(loadConfig(t, tc.doc))
+		for _, w := range tc.want {
+			if !slices.Contains(dirs, w) {
+				t.Errorf("cni.plugin: %s -- RequiredDirs lacks %s: %v", tc.plugin, w, dirs)
+			}
+		}
+		for _, a := range tc.absent {
+			if slices.Contains(dirs, a) {
+				t.Errorf("cni.plugin: %s -- RequiredDirs carries %s, the state of a CNI the node does not run: %v", tc.plugin, a, dirs)
+			}
+		}
+	}
+}
+
+// Same contract, on the SELinux side: the paths the node labels for containers
+// must be the CNI's state and not the other CNI's -- labelling /run/flannel on
+// a cilium node is noise, and missing /run/cilium is a sandbox that fails with
+// a permission error pointing at the wrong file.
+func TestContainerPathsCarryTheCNIState(t *testing.T) {
+	cases := []struct {
+		doc    string
+		plugin string
+		want   []string
+		absent []string
+	}{
+		{doc: workerDoc, plugin: "flannel", want: []string{"/run/flannel"}, absent: []string{"/run/cilium", "/run/netns"}},
+		{doc: strings.Replace(workerDoc, "plugin: flannel", "plugin: cilium", 1), plugin: "cilium", want: []string{"/run/cilium", "/run/netns"}, absent: []string{"/run/flannel"}},
+		{doc: strings.Replace(workerDoc, "plugin: flannel", "plugin: none", 1), plugin: "none", absent: []string{"/run/flannel", "/run/cilium", "/run/netns"}},
+	}
+	for _, tc := range cases {
+		paths := ContainerPaths(loadConfig(t, tc.doc))
+		for _, w := range tc.want {
+			if !slices.Contains(paths, w) {
+				t.Errorf("cni.plugin: %s -- ContainerPaths lacks %s: %v", tc.plugin, w, paths)
+			}
+		}
+		for _, a := range tc.absent {
+			if slices.Contains(paths, a) {
+				t.Errorf("cni.plugin: %s -- ContainerPaths labels %s, the state of a CNI the node does not run: %v", tc.plugin, a, paths)
+			}
+		}
 	}
 }
 
