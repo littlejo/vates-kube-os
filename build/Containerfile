@@ -144,28 +144,40 @@ RUN set -eux; \
 ENV GOTOOLCHAIN=local
 
 FROM go-base AS vates
+# One recipe per binary (recipes/vates/): the stage carries the borrowed Go
+# toolchain and the source, nothing else. The shared Go build cache makes the
+# binaries after the first nearly free, and a change under cmd/<one> rebuilds
+# only that layer.
+COPY lib/common.sh /build/lib/common.sh
+COPY lib/run-recipe.sh /build/lib/run-recipe.sh
 COPY context/src /src
-RUN set -eux; mkdir -p /out/bin; \
-	for c in vates-sysinit vates-console vates-api vates-kubelet-run vates-launcher; do \
-		CGO_ENABLED=0 go build -C /src -trimpath -ldflags '-s -w' -o /out/bin/$c ./cmd/$c; \
-	done
+COPY recipes/vates /build/recipes/vates
+RUN /build/lib/run-recipe.sh vates-sysinit
+RUN /build/lib/run-recipe.sh vates-console
+RUN /build/lib/run-recipe.sh vates-api
+RUN /build/lib/run-recipe.sh vates-kubelet-run
+RUN /build/lib/run-recipe.sh vates-launcher
 
-FROM go-base AS xe
-ARG XE_URL=https://github.com/xcp-ng/xe-guest-utilities/archive/abf2ba46d5d2b91750bbc49d2cc54c6f2d2206f7.tar.gz
-ARG XE_SHA256=c107cae221b0991aeb622adeeb2a3f3554def2b695b985e25bc87b68bdfa5813
+# --- pass 4b: Xen guest agent (Rust) -----------------------------------------
+# The in-guest agent is the Rust gitlab.com/xen-project/xen-guest-agent. This
+# pass builds it -- and the C libxenstore it links -- from pinned sources; the Go
+# xe-guest-utilities it replaces is gone. It is installed and started
+# (internal/sysinit/pid1.go).
+#
+# See docs/XEN-GUEST-AGENT-RUST.md. Recipes: recipes/guest/.
+FROM socle AS guest
+COPY pins.conf /build/pins.conf
+COPY lib/common.sh /build/lib/common.sh
+COPY lib/run-recipe.sh /build/lib/run-recipe.sh
+COPY recipes/guest /build/recipes/guest
+COPY dl/xen-4.21.2.tar.gz /src/dl/
+RUN /build/lib/run-recipe.sh xenstore
+# Rust + clang are build tools, borrowed like the seed gcc: never shipped.
 RUN set -eux; \
-	curl -fL --retry 3 -o /tmp/xe.tar.gz "${XE_URL}"; \
-	echo "${XE_SHA256}  /tmp/xe.tar.gz" | sha256sum -c -; \
-	mkdir -p /xe /out; \
-	tar -xf /tmp/xe.tar.gz -C /xe --strip-components=1; \
-	sed -i \
-		-e 's/@PRODUCT_MAJOR_VERSION@/7/g' \
-		-e 's/@PRODUCT_MINOR_VERSION@/30/g' \
-		-e 's/@PRODUCT_MICRO_VERSION@/0/g' \
-		-e 's/@NUMERIC_BUILD_NUMBER@/0/g' \
-		/xe/guestmetric/guestmetric_linux.go; \
-	CGO_ENABLED=0 go build -C /xe -trimpath -ldflags '-s -w' -o /out/xe-daemon ./xe-daemon; \
-	install -m 0755 /xe/mk/xe-linux-distribution /out/xe-linux-distribution
+	dnf -y --setopt=install_weak_deps=False install rust cargo clang llvm-devel; \
+	dnf clean all
+COPY dl/xen-guest-agent-6acc719.tar.gz /src/dl/
+RUN /build/lib/run-recipe.sh xen-guest-agent
 
 # --- pass 5: container runtime ----------------------------------------------
 # containerd, runc and the CNI plugins, from upstream release artifacts. Only
@@ -210,8 +222,15 @@ COPY --from=kernel /sysroot/boot /sysroot/boot
 COPY --from=kernel /sysroot/lib/modules /sysroot/lib/modules
 COPY recipes/host/systemd-boot.sh /build/recipes/host/systemd-boot.sh
 RUN /build/lib/run-recipe.sh systemd-boot
-COPY --from=vates /out/bin /build/vates-bin
-COPY --from=xe /out /build/xe
+COPY --from=vates /sysroot/usr/local/bin /sysroot/usr/local/bin
+# The Xen guest agent (the `guest` pass): the Rust binary and the shared
+# libxenstore it links at runtime, both installed by the recipes into /sysroot.
+COPY --from=guest /sysroot/usr/sbin/xen-guest-agent /sysroot/usr/sbin/xen-guest-agent
+COPY --from=guest /sysroot/usr/lib/libxenstore.so.4* /sysroot/usr/lib/
+COPY --from=guest /sysroot/usr/lib/libxentoolcore.so.1* /sysroot/usr/lib/
+COPY --from=guest /sysroot/usr/lib/libxentoollog.so.1* /sysroot/usr/lib/
+# The guest components' license texts (the curated notices ride the overlay).
+COPY --from=guest /sysroot/usr/share/licenses /sysroot/usr/share/licenses
 COPY lib/build-kubelet-image.sh /build/lib/build-kubelet-image.sh
 RUN bash /build/lib/build-kubelet-image.sh
 COPY genimage.cfg /build/genimage.cfg

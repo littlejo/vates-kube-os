@@ -13,7 +13,7 @@
 set -euo pipefail
 
 : "${SYSROOT:=/sysroot}"
-LAUNCHER="${LAUNCHER:-/build/vates-bin/vates-launcher}"
+LAUNCHER="${LAUNCHER:-${SYSROOT}/usr/local/bin/vates-launcher}"
 OUT="${OUT:-/build/kubelet.tar}"
 REF="localhost/vates/kubelet:current"
 

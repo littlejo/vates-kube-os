@@ -81,8 +81,10 @@ rootfs | disk)
 	CTX="${HERE}/context"
 	rm -rf "${CTX}"
 	mkdir -p "${CTX}/src"
-	# The Go sources the vates binaries and the kubelet launcher are built from,
-	# inside the Containerfile. xe-guest-utilities is fetched there too.
+	# The Go sources the vates binaries are built from (recipes/vates, run in
+	# the Containerfile's vates stage). The upstream components -- libxenstore
+	# and the Rust Xen guest agent -- are pinned in pins.conf and fetched into
+	# dl/ by this script instead.
 	cp -a "${ROOT}/cmd" "${ROOT}/internal" "${ROOT}/vatescfg" "${ROOT}/proto" "${ROOT}/go.mod" "${ROOT}/go.sum" "${CTX}/src/"
 	cp -a "${HERE}/overlay" "${CTX}/overlay"
 	cp -a "${ROOT}/image/config" "${CTX}/config"

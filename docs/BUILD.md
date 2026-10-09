@@ -45,15 +45,29 @@ flowchart LR
     console["pass 4 · console<br/>freetype fontconfig glib cairo harfbuzz pango dejavu"]
     kernel["pass 1 · kernel<br/>linux + fragment"]
     runtime["pass 5 · runtime<br/>CA bundle + containerd runc + CNI"]
+    gobase["Go toolchain<br/>(borrowed, from the base)"]
+    vates["pass · vates<br/>recipes: the Go binaries"]
+    guest["pass · guest<br/>recipes: libxenstore + xen-guest-agent (Rust)"]
     disk["pass 6 · assemble<br/>skeleton + overlay + kubelet image<br/>+ systemd-boot + genimage"]
 
     base --> libc --> socle --> tools --> console --> runtime --> disk
     libc --> kernel --> disk
+    base --> gobase --> vates --> disk
+    socle --> guest --> disk
 ```
 
-A recipe is a small shell file that fetches one component, builds it, and installs
-it into `/sysroot` — the tree this project owns, seeded with glibc and the kernel
-headers. It defines a single `build()` function:
+Every component that is compiled is a **recipe**: `build/recipes/<pass>/<name>.sh`,
+one `build()` that fetches the pinned component, builds it and installs it into
+`/sysroot`. The `Containerfile` stages add nothing but a **borrowed toolchain** —
+the seed C compiler, the Go compiler, Rust — and the source, then
+`COPY` + `RUN run-recipe.sh <name>`, one cache layer per component. Programs are
+recipes too (`busybox`, `e2fsprogs`, the kernel, the `vates` Go binaries, and the
+Rust Xen guest agent); the only thing outside that rule is **assembly** —
+`assemble.sh` and genimage — because it compiles nothing. `libxenstore`, the C
+library the Rust agent links, is a recipe of its own (`recipes/guest/xenstore.sh`),
+built from the Xen source into `/sysroot`.
+
+A recipe defines a single `build()` function:
 
 ```sh
 # recipes/socle/expat.sh
@@ -86,7 +100,8 @@ A recipe may only use what the passes **before** it installed.
 |---|---|
 | glibc | **built here**, from the GNU source |
 | kernel, busybox, util-linux, the console stack, containerd's userspace | **built here** (or from upstream release binaries) |
-| the `vates` binaries, the Xen guest agent | **built here** (Go, inside the build) |
+| the `vates` binaries (Go) | **built here**, from this repository's own source |
+| the Xen guest agent (Rust) | **built here** from `xen-project/xen-guest-agent`, replacing the Go `xe-guest-utilities` |
 | containerd, runc, the CNI plugins | upstream **release binaries** |
 | systemd-boot | **built here** from the systemd source, without installing systemd |
 | the seed compiler and its runtime | **borrowed** from the build image, **not shipped** |
