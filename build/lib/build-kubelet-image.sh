@@ -34,18 +34,33 @@ mkdir -p "${stage}"/bin "${stage}"/sbin "${stage}"/etc/ssl/certs \
 mkdir -p "${stage}/lib64" "${stage}/usr/lib64"
 
 # The node's own libraries (our glibc included), so the container runs on it.
-# The kubelet's userspace does not need the console's stack, so the cairo/pango/
-# harfbuzz/glib family and every static/dev artifact are left out -- copied whole
-# it would be ~190 MB of which ~95 MB is harfbuzz alone.
+#
+# Only what the binaries in the image actually load. The launcher, kubelet,
+# kubeadm and kubectl need glibc (measured: the published kubelet links libc,
+# libresolv and libpthread; kubeadm and kubectl are static), and the small
+# userspace needs glibc plus libmnl/libnftnl/libxtables. Copied whole from
+# /sysroot the rootfs was 39 MB; the rules below bring it to ~20 MB. The archive
+# is imported into containerd on every node at first boot, so the saving is paid
+# on every machine.
 cp -a "${SYSROOT}/lib/." "${stage}/lib/"
 cp -a "${SYSROOT}/lib64/." "${stage}/lib64/"
 cp -a "${SYSROOT}/usr/lib/." "${stage}/usr/lib/"
 [ -d "${SYSROOT}/usr/lib64" ] && cp -a "${SYSROOT}/usr/lib64/." "${stage}/usr/lib64/"
+# 1. the kernel modules (7 MB): the host's, and the container loads none. A
+#    kubeadm container inspects the host's tree through a bind mount, not this.
+rm -rf "${stage}/lib/modules"
+# 2. the static and development artifacts, and the two sub-trees the patterns
+#    below do not reach: gconv (8 MB of charset tables) and cairo's trace helper.
 find "${stage}/usr/lib" -maxdepth 1 \( -name '*.a' -o -name '*.la' \) -delete
-rm -rf "${stage}/usr/lib/pkgconfig" "${stage}/usr/share/pkgconfig"
+rm -rf "${stage}/usr/lib/pkgconfig" "${stage}/usr/share/pkgconfig" \
+	"${stage}/usr/lib/gconv" "${stage}/usr/lib/cairo"
+# 3. the console's stack (copied whole ~190 MB, ~95 MB of it harfbuzz), the C++
+#    runtime (libstdc++) and GObject introspection: nothing in the kubelet
+#    container loads them.
 for pat in 'libharfbuzz*' 'libcairo*' 'libpango*' 'libpixman*' 'libgio-*' \
-	'libglib-*' 'libgobject-*' 'libgmodule-*' 'libfontconfig*' 'libfreetype*' \
-	'libpng*' 'libfribidi*' 'libdrm*' 'libexpat*' 'libffi*' 'libpcre2*' 'libpopt*'; do
+	'libglib-*' 'libgobject-*' 'libgmodule-*' 'libgthread*' 'libgirepository*' \
+	'libfontconfig*' 'libfreetype*' 'libstdc++*' 'libpng*' 'libfribidi*' \
+	'libdrm*' 'libexpat*' 'libffi*' 'libpcre2*' 'libpopt*'; do
 	# The pattern is a glob on purpose: it must expand, not be a literal name.
 	# shellcheck disable=SC2086
 	rm -f "${stage}"/usr/lib/${pat}
@@ -79,6 +94,32 @@ install -D -m 0755 "${LAUNCHER}" "${stage}/usr/local/bin/vates-launcher"
 for n in kubelet kubeadm kubectl mounter; do
 	ln -sf /usr/local/bin/vates-launcher "${stage}/usr/local/bin/${n}"
 done
+
+# Guard: every shared object the container's own binaries load must be present,
+# so an over-eager rule above fails the build here rather than on a node. It
+# walks the libraries too, which is what catches a leftover whose dependency was
+# pruned (libgthread without libglib, for instance). The kubelet itself is
+# fetched at run time and is not covered; it is the reason the glibc copy cannot
+# be trimmed further -- the published binary is dynamic.
+if command -v readelf >/dev/null 2>&1; then
+	missing="$(
+		for exe in $(find "${stage}"/bin "${stage}"/sbin "${stage}"/usr/bin \
+			"${stage}"/usr/sbin "${stage}"/usr/local/bin "${stage}"/lib \
+			"${stage}"/lib64 "${stage}"/usr/lib "${stage}"/usr/lib64 \
+			-type f \( -perm -u+x -o -name '*.so*' \) 2>/dev/null); do
+			for lib in $(readelf -d "${exe}" 2>/dev/null | awk '/NEEDED/{print $NF}' | tr -d '[]'); do
+				find "${stage}/lib" "${stage}/lib64" "${stage}/usr/lib" "${stage}/usr/lib64" \
+					-name "${lib}" -print -quit 2>/dev/null | grep -q . ||
+					echo "${lib} (needed by ${exe})"
+			done
+		done
+	)"
+	if [ -n "${missing}" ]; then
+		echo "kubelet image: shared libraries missing from the rootfs:" >&2
+		echo "${missing}" >&2
+		exit 1
+	fi
+fi
 
 # The docker-archive: one layer, its config, and the manifest.
 tar --numeric-owner -C "${stage}" -cf "${arc}/layer.tar" .
