@@ -21,9 +21,17 @@
 # Adapted to this image, in two places:
 #
 #   - the agent's runtime state (the chart's /var/run/cilium and
-#     /var/run/netns) is placed under /run instead. /var is a separate
-#     partition with no /var/run symlink here, and the CNI state is a
-#     tmpfs concern that PID 1 already provides at /run.
+#     /var/run/netns) is placed under /run instead. The CNI state is a
+#     tmpfs concern, and PID 1 mounts /run and recreates the standard
+#     /var/run -> /run symlink (internal/sysinit) on the /var partition.
+#     That symlink is load-bearing: the cilium-cni plugin the agent
+#     installs on the host is COMPILED with /var/run/cilium/cilium.sock
+#     and dials it, which through the link reaches the socket the agent
+#     listens on under its /run/cilium hostPath. Without it every pod's
+#     sandbox fails with "dial unix /var/run/cilium/cilium.sock: no such
+#     file or directory" while the node stays Ready -- the kubelet is
+#     happy as soon as a conflist exists, and only the plugin's first
+#     dial proves the socket is reachable.
 #   - the operator runs with one replica. The chart ships two with a
 #     required pod anti-affinity, which would leave the second pod Pending
 #     on a single-node cluster.
@@ -236,7 +244,7 @@ data:
   # Tell the agent to generate and write a CNI configuration file
   write-cni-conf-when-ready: /host/etc/cni/net.d/05-cilium.conflist
   cni-exclusive: "true"
-  cni-log-file: "/run/cilium/cilium-cni.log"
+  cni-log-file: "/var/run/cilium/cilium-cni.log"
   enable-endpoint-health-checking: "true"
   enable-health-checking: "true"
   health-check-icmp-failure-threshold: "3"

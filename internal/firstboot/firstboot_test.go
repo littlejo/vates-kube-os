@@ -977,7 +977,7 @@ func TestCiliumManifestRendersPinnedAndAdapted(t *testing.T) {
 		t.Errorf("the cilium manifest carries the pod CIDR %q; it must come from the node's podCIDR annotation, not from the manifest", cidr)
 	}
 	if strings.Contains(string(m), "path: /var/run") {
-		t.Error("the cilium manifest still places the hostPath state under /var/run (the image has no /var/run symlink; the state goes under /run)")
+		t.Error("the cilium manifest still names a /var/run hostPath; the hostPath the node creates and labels is the /run one, and the chart's /var/run paths are reached on the host through the standard /var/run -> /run link PID 1 recreates")
 	}
 }
 
