@@ -9,24 +9,16 @@ import (
 	"github.com/vatesfr/vates-kube-os/vatescfg"
 )
 
-// KubeadmImage is the image the kubeadm phases are run from.
+// KubeadmPath and KubectlPath are where the launcher's faces live on the host.
 //
-// It is the same image as the kubelet's, deliberately. kubeadm, kubelet, mounter
-// and kubectl are downloaded together and share a library closure, so a second
-// image would mean a second Containerfile and a second closure calculation for no
-// benefit. The kubelet unit and this both name the same content.
-//
-// Running kubeadm from a container is what keeps "no Kubernetes binary on the
-// host" true: in a kubeadm-based distribution kubeadm is installed on the
-// machine itself.
-// The version is accepted and ignored. It used to select a per-version image,
-// and the callers still pass what they were configured with; keeping the
-// parameter means the day an image has to be versioned again there is one place
-// to change, and until then the image is the same for every version.
-func KubeadmImage(version string) string {
-	_ = version
-	return KubeletImageRef
-}
+// The Kubernetes binaries are not in the image: the launcher fetches them at
+// first boot into /var/lib/vates/kubernetes, and these are the names it answers
+// to on the host. Running kubeadm or kubectl is therefore an ordinary exec that
+// the launcher turns into a fetch, verify and run. See docs/ARCHITECTURE.md.
+const (
+	KubeadmPath = "/usr/local/bin/kubeadm"
+	KubectlPath = "/usr/local/bin/kubectl"
+)
 
 // KubeadmConfigPath is where vates-init writes the document the phases read.
 //
@@ -86,10 +78,10 @@ spec:
 // RequiredDirs are the host directories that must exist before the kubelet is
 // started, for either role.
 //
-// These are not conveniences. Each one is either a bind-mount source for the
-// kubelet container -- and the runtime refuses a mount whose source does not
-// exist, failing the unit with "statfs <path>: no such file or directory" -- or a
-// hostPath in a static pod manifest. Nothing else in the image creates them.
+// These are not conveniences: each one is a hostPath a static pod manifest names,
+// or a directory the kubelet or the launcher writes into. A hostPath that does
+// not exist is a pod that never starts, and nothing else in the image creates
+// them.
 //
 // The manifests directory matters especially for a control plane: a manifest
 // written after the kubelet has started is eventually picked up, but the VIP must
@@ -105,13 +97,12 @@ func RequiredDirs(cfg *vatescfg.Config) []string {
 		// while an already-configured one worked.
 		"/run/flannel",
 		// The kubelet reads its KubeletConfiguration from here through
-		// --config, mounted read-only.
+		// --config.
 		"/etc/kubelet",
 		// Where this node's drop-in is written.
 		filepath.Dir(KubeletDropIn),
-		// Where the launcher caches the Kubernetes binaries it fetches. A mount
-		// source for the kubelet container, so the runtime refuses to start the
-		// unit if it is absent.
+		// Where the launcher caches the Kubernetes binaries it fetches. It is on
+		// the writable /var, and the kubelet needs it at every start.
 		BinariesDir,
 	}
 	if cfg.Role == vatescfg.RoleMaster {
@@ -279,24 +270,14 @@ func MasterFiles(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, no
 
 // KubeadmPhaseCommand builds the command that runs one kubeadm init phase.
 //
-// The container gets the host's /etc/kubernetes and /var/lib/etcd because those
-// are exactly what the phases produce and what the static pods later consume.
-// --net=host is not needed by the phases themselves, but it keeps the container
-// from needing its own network namespace for no benefit.
-//
 // The phases are run individually rather than through `kubeadm init` because
-// `kubeadm init` also installs and starts a host kubelet, and this system runs
-// the kubelet in a container.
+// `kubeadm init` also installs and starts a kubelet; this system starts its own
+// kubelet as a host process, before the phase list runs.
 //
 // phase is a complete phase path such as "etcd local"; it is split into
 // arguments here so the callers cannot forget that etcd has no `all`.
-func KubeadmPhaseCommand(image, phase string) []string {
-	args := kubeadmContainers()
-	// kubeadm is fetched at run time, like the kubelet: the image is generic and
-	// the version comes from vates-node.yaml, so the cache and the version travel
-	// with every phase.
-	args = append(args, binarySourceArgs()...)
-	args = append(args, image, ctrContainerID("kubeadm"), "/usr/local/bin/kubeadm", "init", "phase")
+func KubeadmPhaseCommand(phase string) []string {
+	args := []string{KubeadmPath, "init", "phase"}
 	args = append(args, strings.Fields(phase)...)
 	args = append(args, "--config", KubeadmConfigPath)
 	return args

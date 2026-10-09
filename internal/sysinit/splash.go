@@ -77,11 +77,10 @@ type splashPhase struct {
 // the bar is full exactly when the last phase is done.
 var splashPhases = []splashPhase{
 	{"mount", "mounting the filesystems", 0.05},
-	{"containerd", "starting the container runtime", 0.10},
-	{"network", "bringing up the network", 0.10},
-	{"images", "importing the kubelet image", 0.20},
-	{"configure", "configuring the node", 0.30},
-	{"kubelet", "starting the kubelet", 0.25},
+	{"containerd", "starting the container runtime", 0.15},
+	{"network", "bringing up the network", 0.15},
+	{"configure", "configuring the node", 0.35},
+	{"kubelet", "starting the kubelet", 0.30},
 }
 
 // The planet PNG has transparent margins around the artwork (it is 2600 square

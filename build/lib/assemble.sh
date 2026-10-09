@@ -18,7 +18,6 @@ GENIMAGE="${GENIMAGE:-/opt/host/bin/genimage}"
 # The vates binaries and the Xen guest agent are already in ${SYSROOT}, installed
 # by the recipes (the `vates` and `guest` stages, copied in by `disk`); assembly
 # does not copy binaries.
-KUBELET_TAR="${KUBELET_TAR:-/build/kubelet.tar}"
 
 ROOT_A_PARTUUID="d3e1f3a0-1b2c-4d5e-8f90-a1b2c3d4e5f6"
 ROOT_B_PARTUUID="d3e1f3a0-1b2c-4d5e-8f90-a1b2c3d4e5f7"
@@ -62,8 +61,14 @@ echo "=== [assemble] the vates faces ==="
 ln -sf vates-sysinit "${SYSROOT}/usr/local/bin/vates-init"
 ln -sf vates-sysinit "${SYSROOT}/usr/local/bin/vates-splash"
 ln -sf vates-console "${SYSROOT}/usr/local/bin/vates-dashboard"
+# The launcher's Kubernetes faces, on the host: kubelet, kubeadm, kubectl and
+# mounter are all the launcher, which fetches and runs the version vates-node.yaml
+# asks for. They are what PID 1 and vates-init exec.
+for n in kubelet kubeadm kubectl mounter; do
+	ln -sf vates-launcher "${SYSROOT}/usr/local/bin/${n}"
+done
 
-echo "=== [assemble] overlay, /etc, assets, kubelet image ==="
+echo "=== [assemble] overlay, /etc, assets ==="
 cp -a "${CTX}/overlay/." "${SYSROOT}/"
 install -d "${SYSROOT}/etc/modules-load.d" "${SYSROOT}/etc/sysctl.d" \
 	"${SYSROOT}/usr/share/vates/cni/net.d" "${SYSROOT}/usr/share/vates/cni/bin" \
@@ -73,10 +78,6 @@ install -d "${SYSROOT}/etc/modules-load.d" "${SYSROOT}/etc/sysctl.d" \
 [ -d "${CTX}/config/sysctl.d" ] && cp -a "${CTX}/config/sysctl.d/." "${SYSROOT}/etc/sysctl.d/"
 install -d "${SYSROOT}/usr/share/vates/assets"
 [ -d "${CTX}/assets" ] && cp -a "${CTX}/assets/." "${SYSROOT}/usr/share/vates/assets/"
-if [ -f "${KUBELET_TAR}" ]; then
-	cp "${KUBELET_TAR}" "${SYSROOT}/usr/share/vates/kubelet.tar"
-	echo "  kubelet image staged"
-fi
 
 echo "=== [assemble] iptables defaults to nftables ==="
 # The legacy xtables need the kernel's ip_tables/nat tables, which this kernel

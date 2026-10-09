@@ -50,14 +50,16 @@ var pid1Mounts = []pid1Mount{
 const (
 	pid1Containerd     = "/usr/bin/containerd"
 	pid1ContainerdConf = "/etc/containerd/config.toml"
-	// Where containerd listens. PID 1 uses ctr (the kubelet image import, and
-	// configure's kubeadm phases) and ctr fails outright until this exists.
+	// Where containerd listens. PID 1 waits for it before starting the kubelet,
+	// which talks to the CRI on this socket.
 	pid1ContainerdSocket = "/run/containerd/containerd.sock"
 	// vates-console, not vates-dashboard: it picks the graphical face when there
 	// is a DRM card and falls back to the text one otherwise. One image, both.
 	pid1Console = "/usr/local/bin/vates-console"
-	// The kubelet container runner, started as a child instead of by systemd.
-	pid1KubeletRun = "/usr/local/bin/vates-kubelet-run"
+	// The kubelet, started by PID 1 as a host process. It is a symlink to the
+	// launcher, which fetches the version vates-node.yaml asks for, verifies it,
+	// caches it under /var and execs it. There is no container and no image.
+	pid1Kubelet = "/usr/local/bin/kubelet"
 	// The management API (mTLS gRPC), the thing that replaces SSH: a child of
 	// PID 1.
 	pid1API = "/usr/local/bin/vates-api"
@@ -68,47 +70,11 @@ const (
 	// what makes the VM's IP, its OS and a clean shutdown visible to the
 	// hypervisor.
 	pid1XenGuestAgent = "/usr/sbin/xen-guest-agent"
-	// The kubelet image, shipped as a docker-archive and imported on first boot.
-	// It is the launcher that fetches the Kubernetes binaries for the version
-	// vates-node.yaml asks for, so it is identical on every node and in the
-	// image; only the archive travels.
-	//
-	// On the ROOT filesystem, not under /var: /var is a partition of its own,
-	// mounted over the root's /var early in boot, so anything shipped at
-	// /var/... in the image would be hidden. The archive is read, not kept, so
-	// the root filesystem is where it belongs.
-	pid1KubeletTar = "/usr/share/vates/kubelet.tar"
 	// The boot splash: the wordmark and the bring-up steps, drawn on the screen
 	// before the console takes it over. It is Plymouth replaced by this binary,
 	// nothing more.
 	pid1Splash = "/usr/local/bin/vates-splash"
 )
-
-// importKubeletImage loads the kubelet image into containerd's `vates`
-// namespace, the one the runner uses, unless it is already there.
-//
-// The image cannot reach containerd's store from a Containerfile, so the archive
-// is shipped in the rootfs and imported here, before configure -- which refuses
-// to configure a node whose kubelet image is missing.
-func importKubeletImage() {
-	if _, err := os.Stat(pid1KubeletTar); err != nil {
-		kmsg("kubelet image: %s not shipped: %v", pid1KubeletTar, err)
-		return
-	}
-	if out, err := exec.Command("ctr", "-n", "vates", "images", "ls", "-q").Output(); err == nil {
-		if strings.Contains(string(out), "vates/kubelet") {
-			kmsg("kubelet image: already present")
-			return
-		}
-	}
-	cmd := exec.Command("ctr", "-n", "vates", "images", "import", pid1KubeletTar)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		kmsg("kubelet image: import failed: %v", err)
-		return
-	}
-	kmsg("kubelet image imported")
-}
 
 // Pid1 is the entry point when the binary is PID 1. It never returns: it either
 // runs forever or reboots the machine.
@@ -157,11 +123,12 @@ func Pid1(_ []string) error {
 		kmsg("containerd: %v", err)
 		bootStep("containerd", "fail")
 	} else {
-		// ctr is used right after this -- the kubelet image import, and
-		// configure's kubeadm phases -- and fails until the socket exists.
-		// Measured on XCP-ng: containerd outran the network bring-up and PID 1
-		// used ctr before it was listening, which cost the whole control plane
-		// (see waitContainerd).
+		// The kubelet, started a few steps below, talks to the CRI on this
+		// socket, and its own static pods are containers containerd runs, so the
+		// socket has to be there before it starts. Measured on XCP-ng: containerd
+		// outran the network bring-up, which cost the whole control plane (see
+		// waitContainerd).
+		waitContainerd(30 * time.Second)
 		waitContainerd(30 * time.Second)
 		bootStep("containerd", "ok")
 	}
@@ -169,9 +136,6 @@ func Pid1(_ []string) error {
 	bringUpNetwork()
 	bootStep("network", "ok")
 	startGuestAgent()
-	bootStep("images", "wait")
-	importKubeletImage()
-	bootStep("images", "ok")
 	bootStep("configure", "wait")
 	dashboard.SetPhase("configuring the node")
 	configureNode()
@@ -194,12 +158,11 @@ func Pid1(_ []string) error {
 
 // makeRShared makes a mount recursive-shared, as systemd does for / at boot.
 //
-// Without it, a container started with Linux.RootfsPropagation=rshared -- the
-// kubelet, whose projected service-account token is a tmpfs that must reach the
-// host so the pod sandboxes can mount it -- propagates nothing: a shared mount
-// under a private parent stays private. Measured: every pod failed with
-// "open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or
-// directory", kube-proxy and flannel crash-looping on it.
+// The kubelet is a host process now, so its mounts and containerd's already
+// share one namespace and nothing here needs the propagation the container era
+// required. The call is kept because systemd makes / shared for its own reasons
+// and removing it is a separate, measurable change -- but it is no longer load
+// bearing for pod volumes.
 func makeRShared(path string) {
 	if err := syscall.Mount("", path, "", syscall.MS_SHARED|syscall.MS_REC, ""); err != nil {
 		kmsg("mount: make-rshared %s: %v", path, err)
@@ -350,16 +313,27 @@ func configureNode() {
 	kmsg("configure complete")
 }
 
-// startKubelet starts the kubelet container through the runner. Under systemd
-// this was k8s-kubelet.service; under PID 1 it is a child.
+// startKubelet starts the kubelet, as a child of PID 1.
+//
+// It is a host process now, not a container: /usr/local/bin/kubelet is a symlink
+// to the launcher, which fetches the version vates-node.yaml asks for, verifies
+// it, caches it under /var and execs it. Nothing stands between PID 1 and the
+// node agent, and no containerd and no image are involved.
+//
+// The environment carries KUBERNETES_VERSION and KUBERNETES_BINARY_BASE, which
+// Configure set in this process from the document; the launcher reads them.
 func startKubelet() {
-	if _, err := os.Stat(pid1KubeletRun); err != nil {
-		kmsg("kubelet: %s: %v", pid1KubeletRun, err)
+	if _, err := os.Stat(pid1Kubelet); err != nil {
+		kmsg("kubelet: %s: %v", pid1Kubelet, err)
 		return
 	}
-	if err := startChild("kubelet", pid1KubeletRun, kubeletArgs()...); err != nil {
+	if err := startChild("kubelet", pid1Kubelet, kubeletArgs()...); err != nil {
 		kmsg("kubelet: %v", err)
+		return
 	}
+	kubeletMu.Lock()
+	kubeletStartedAt = time.Now()
+	kubeletMu.Unlock()
 }
 
 // bootstrapNode runs the cluster-wide bootstrap, as the systemd unit did after
@@ -433,20 +407,19 @@ func startGuestAgent() {
 	}
 }
 
-// kubeletArgs builds the command line the systemd unit used to carry. The
-// per-node values (NODE_NAME, NODE_IP, the bootstrap kubeconfig) are read from
-// the drop-in configure wrote, so there is one source for them rather than a
-// second copy here.
+// kubeletArgs builds the kubelet's command-line flags. The per-node values
+// (NODE_NAME, NODE_IP, the bootstrap kubeconfig) are read from the drop-in
+// configure wrote, so there is one source for them rather than a second copy
+// here. The program itself is pid1Kubelet, which startChild supplies as argv[0].
 func kubeletArgs() []string {
 	return kubeletArgsFromEnv(dropInEnv(firstboot.KubeletDropIn))
 }
 
-// kubeletArgsFromEnv builds the kubelet's command line from the drop-in
-// environment. Split from kubeletArgs so the mapping -- which value becomes
-// which flag -- is testable without a file on disk.
+// kubeletArgsFromEnv builds the kubelet's flags from the drop-in environment.
+// Split from kubeletArgs so the mapping -- which value becomes which flag -- is
+// testable without a file on disk.
 func kubeletArgsFromEnv(env map[string]string) []string {
 	args := []string{
-		"/usr/local/bin/kubelet",
 		"--config=/etc/kubelet/kubelet.conf",
 		"--root-dir=/var/lib/kubelet",
 		"--kubeconfig=/etc/kubernetes/kubelet.conf",
@@ -825,6 +798,34 @@ func restartConsole() {
 	startConsole()
 }
 
+// kubeletMu guards kubeletStartedAt, the last time the kubelet was launched, so
+// that a crash loop is rate-limited the way the console's is.
+var (
+	kubeletMu        sync.Mutex
+	kubeletStartedAt time.Time
+)
+
+// restartKubelet brings the kubelet back after it exited on its own.
+//
+// The kubelet is the node: a crash must not leave a machine that pings but runs
+// no cluster, which is what would happen without this. Rate-limited like the
+// console, so a kubelet that dies at once does not fork as fast as the kernel
+// reaps, and NOT restarted during shutdown, where the child was stopped on
+// purpose.
+func restartKubelet() {
+	kubeletMu.Lock()
+	wait := time.Until(kubeletStartedAt.Add(time.Second))
+	kubeletMu.Unlock()
+	if wait > 0 {
+		time.Sleep(wait)
+	}
+	if shuttingDown.Load() {
+		return
+	}
+	kmsg("kubelet: restarting")
+	startKubelet()
+}
+
 // vtActivate is the Linux VT_ACTIVATE ioctl (from linux/vt.h). The argument is a
 // value, not a pointer, so no unsafe is needed.
 const vtActivate = 0x5606
@@ -1125,6 +1126,10 @@ func reap() {
 		// the child was stopped on purpose.
 		if name == "console" && !shuttingDown.Load() {
 			restartConsole()
+		}
+		// The kubelet holds the node together; a crash must not leave it dead.
+		if name == "kubelet" && !shuttingDown.Load() {
+			restartKubelet()
 		}
 	}
 }

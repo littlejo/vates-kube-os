@@ -51,7 +51,7 @@ parallel:
 - **pass 1 — kernel**: `linux` + the fragment (independent; builds alongside)
 - **pass 5 — runtime**: `containerd, runc` and the CNI plugins, from upstream
   release artifacts
-- **pass 6 — assemble**: systemd-boot, the kubelet image and genimage, plus the
+- **pass 6 — assemble**: systemd-boot and genimage, plus the
   inputs `assemble.sh` needs; `build.sh` runs it into `build/out`
 
 Each component is its own container layer, so changing one recipe rebuilds only
@@ -112,7 +112,6 @@ board/                our kernel and busybox fragments (self-contained copy)
 overlay/              what goes into the rootfs (our config)
 lib/common.sh         native env + fetch/verify/unpack + autotools/meson drivers
 lib/build-libc.sh     pass -1: kernel headers + glibc + compiler runtime seed
-lib/build-kubelet-image.sh  the kubelet OCI image, as a hand-built docker-archive
 lib/cross.ini         meson cross file
 lib/run-recipe.sh     sources common.sh + the recipe, runs build()
 recipes/<pass>/<c>.sh one recipe per component
@@ -122,8 +121,7 @@ dl/                   fetched source tarballs (gitignored)
 
 Inside the Containerfile, beyond the passes: a `go-base` stage (Fedora's Go) with
 `vates` (the vates binaries) built from it; the `guest` pass (the Rust Xen guest
-agent and libxenstore) on `socle`; systemd-boot built in the `disk` stage; and the
-kubelet image built from `/sysroot` by `lib/build-kubelet-image.sh`.
+agent and libxenstore) on `socle`; and systemd-boot built in the `disk` stage.
 
 ## Status
 
@@ -133,8 +131,8 @@ kubelet image built from `/sysroot` by `lib/build-kubelet-image.sh`.
 - [x] pass 3 (tools) + pass 4 (console) + pass 5 (containerd/runc/CNI)
 - [x] pass 1 (kernel) + pass 6 (assemble) — a bootable A/B disk (`out/vates.qcow2`)
 - [x] the disk boots under UEFI: systemd-boot → kernel → `vates-sysinit` → console
-- [x] nothing is built on the host: the vates binaries, the Rust Xen agent, the
-      kubelet image and systemd-boot are all built by the Containerfile (recipes,
+- [x] nothing is built on the host: the vates binaries, the Rust Xen agent and
+      systemd-boot are all built by the Containerfile (recipes,
       with the Go and Rust toolchains borrowed from the base)
 - [x] the disk boots and `make cluster CP=1 WORKERS=0` brings up a real
       single-node control plane: etcd, apiserver, controller-manager, scheduler,

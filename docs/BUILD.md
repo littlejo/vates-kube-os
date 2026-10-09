@@ -48,7 +48,7 @@ flowchart LR
     gobase["Go toolchain<br/>(borrowed, from the base)"]
     vates["pass · vates<br/>recipes: the Go binaries"]
     guest["pass · guest<br/>recipes: libxenstore + xen-guest-agent (Rust)"]
-    disk["pass 6 · assemble<br/>skeleton + overlay + kubelet image<br/>+ systemd-boot + genimage"]
+    disk["pass 6 · assemble<br/>skeleton + overlay<br/>+ systemd-boot + genimage"]
 
     base --> libc --> socle --> tools --> console --> runtime --> disk
     libc --> kernel --> disk
