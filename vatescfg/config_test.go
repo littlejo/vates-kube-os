@@ -96,6 +96,33 @@ func TestLoadAcceptsNoneCNIAndProxyDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsTheCNIToFlannel(t *testing.T) {
+	// Flannel is the cluster's default pod network: a document that omits
+	// cni.plugin behaves exactly like one that states it, which is what keeps
+	// every existing vates-node.yaml working when the field became optional.
+	doc := strings.Replace(baseWorker, "  plugin: flannel\n", "", 1)
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load() rejected a document without cni.plugin: %v", err)
+	}
+	if c.CNI.Plugin != CNIFlannel {
+		t.Errorf("cni.plugin = %q, want the default %q", c.CNI.Plugin, CNIFlannel)
+	}
+}
+
+func TestLoadAcceptsCilium(t *testing.T) {
+	// Cilium is the second CNI the node installs itself; it runs WITH
+	// kube-proxy, so no cluster.proxy.disabled is involved.
+	doc := strings.Replace(baseWorker, "plugin: flannel", "plugin: cilium", 1)
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load() rejected cni.plugin: cilium: %v", err)
+	}
+	if c.CNI.Plugin != CNICilium {
+		t.Errorf("cni.plugin = %q, want %q", c.CNI.Plugin, CNICilium)
+	}
+}
+
 func TestLoadRejects(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -205,11 +232,6 @@ func TestLoadRejects(t *testing.T) {
 			wantSub: "network.gateway is required",
 		},
 		{
-			name:    "missing cni plugin",
-			doc:     strings.Replace(baseWorker, "  plugin: flannel\n", "", 1),
-			wantSub: "cni.plugin is required",
-		},
-		{
 			// An unimplemented CNI must be rejected, not accepted and ignored.
 			name:    "unsupported cni",
 			doc:     strings.Replace(baseWorker, "plugin: flannel", "plugin: calico", 1),
@@ -220,6 +242,16 @@ func TestLoadRejects(t *testing.T) {
 			// disabling it there is a cluster whose Services do nothing.
 			name:    "proxy disabled with flannel",
 			doc:     strings.Replace(baseWorker, "  token:", "  proxy:\n    disabled: true\n  token:", 1),
+			wantSub: "cluster.proxy.disabled requires cni.plugin: none",
+		},
+		{
+			// Same for cilium: it is installed here as a pod network beside
+			// kube-proxy, not as a kube-proxy replacement, so the pair is as
+			// wrong as the flannel one.
+			name: "proxy disabled with cilium",
+			doc: strings.Replace(
+				strings.Replace(baseWorker, "plugin: flannel", "plugin: cilium", 1),
+				"  token:", "  proxy:\n    disabled: true\n  token:", 1),
 			wantSub: "cluster.proxy.disabled requires cni.plugin: none",
 		},
 		{

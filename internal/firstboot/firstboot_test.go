@@ -69,6 +69,25 @@ cni:
   cidr: "10.244.0.0/16"
 `
 
+// ciliumMasterDoc is masterDoc with the second CNI selected: the bootstrap
+// control plane it drives applies the Cilium manifest instead of Flannel's, and
+// Flannel's is absent from the node entirely.
+const ciliumMasterDoc = `
+role: master
+kubernetes:
+  version: v1.31.0
+cluster:
+  controlPlaneEndpoint: "192.168.1.10:6443"
+  vip:
+    address: "192.168.1.10"
+network:
+  iface: eth0
+  mode: dhcp
+cni:
+  plugin: cilium
+  cidr: "10.244.0.0/16"
+`
+
 // workerDrive builds a config drive with everything a worker needs. That is the
 // cluster CA and the token in vates-node.yaml: the kubelet bootstraps its own
 // certificate, so no credential is placed here.
@@ -732,13 +751,154 @@ func TestBootstrapPhasesOmitKubeProxyWhenTheCNIReplacesIt(t *testing.T) {
 	}
 }
 
+// The bootstrap control plane applies the pod network itself. What it applies
+// is whatever cni.plugin selected -- and only that. The flannel and cilium
+// manifests coexist in the binary, so the failure this pins down is a flannel
+// file being written on a cilium node, or the apply reaching a manifest that
+// was never written.
+func TestBootstrapAppliesTheCNITheNodeInstalls(t *testing.T) {
+	cases := []struct {
+		name         string
+		doc          string
+		plugin       string
+		wantManifest string // written and applied; empty for none
+	}{
+		{
+			name:         "flannel",
+			doc:          masterDoc,
+			plugin:       "flannel",
+			wantManifest: FlannelManifestPath,
+		},
+		{
+			name:         "cilium",
+			doc:          ciliumMasterDoc,
+			plugin:       "cilium",
+			wantManifest: CiliumManifestPath,
+		},
+		{
+			name:   "none writes and applies nothing",
+			doc:    strings.Replace(masterDoc, "plugin: flannel", "plugin: none", 1),
+			plugin: "none",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &fakeRunner{healthz: true}
+			if err := Bootstrap(loadConfig(t, tc.doc), bareDrive(t, tc.doc), testPaths(t), "vates-cp-1", "192.168.122.50", r); err != nil {
+				t.Fatalf("Bootstrap() failed: %v", err)
+			}
+
+			// The manifest is written to disk before the kubeadm phases run, so
+			// that a failed addon phase leaves the file on disk to read.
+			if tc.wantManifest != "" {
+				found := false
+				for _, w := range r.writes {
+					if w == tc.wantManifest {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("Bootstrap() never wrote %s; writes were %v", tc.wantManifest, r.writes)
+				}
+				// The apply names the exact file, through the cluster's kubeconfig.
+				var applied bool
+				for _, c := range r.commands {
+					if strings.Contains(c, "apply -f "+tc.wantManifest) {
+						applied = true
+					}
+				}
+				if !applied {
+					t.Errorf("Bootstrap() never applied %s; commands were %v", tc.wantManifest, r.commands)
+				}
+			}
+			// The OTHER CNI's manifest must not be written or applied either:
+			// a flannel file on a cilium node is the exact bug this feature
+			// exists to prevent.
+			for _, manifest := range []string{FlannelManifestPath, CiliumManifestPath} {
+				if manifest == tc.wantManifest {
+					continue
+				}
+				for _, w := range r.writes {
+					if w == manifest {
+						t.Errorf("cni.plugin: %s wrote the %s manifest", tc.plugin, manifest)
+					}
+				}
+				for _, c := range r.commands {
+					if strings.Contains(c, "apply -f "+manifest) {
+						t.Errorf("cni.plugin: %s applied the manifest of the CNI it does not run: %s", tc.plugin, c)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The two CNIs are the same field, cni.cidr, told to two different readers:
+// flannel is given the range in its manifest, cilium reads it from the node's
+// podCIDR annotation, which kubeadm writes from the same field. This is what
+// keeps the two interchangeable in vates-node.yaml, so assert the rendering of
+// both sides of the contract.
+func TestCiliumManifestRendersPinnedAndAdapted(t *testing.T) {
+	m, err := CiliumManifest(loadConfig(t, ciliumMasterDoc))
+	if err != nil {
+		t.Fatalf("CiliumManifest() failed: %v", err)
+	}
+	for _, want := range []string{
+		// The pin, tag and digest, as the chart carries it.
+		`image: "quay.io/cilium/cilium:v1.20.1@sha256:ae9ea21f7427fe24bc6ea7247eb552157a1b0a431744045d3f641545ca71d11b"`,
+		`image: "quay.io/cilium/operator-generic:v1.20.1@sha256:6c3885fc7b629099fdbe2a5c87869c86feb825fa18fae299eac0f61918d16ecf"`,
+		// The adaptations stated in the template's header.
+		"ipam: \"kubernetes\"",
+		"kube-proxy-replacement: \"false\"",
+		"enable-tcx: \"false\"",
+		"cgroup-root: \"/sys/fs/cgroup\"",
+		// The state goes under /run, the PID-1 tmpfs, not under /var.
+		"path: /run/cilium",
+		"path: /run/netns",
+		// A single bootstrap node cannot run the chart's two-operator
+		// anti-affinity.
+		"replicas: 1",
+	} {
+		if !strings.Contains(string(m), want) {
+			t.Errorf("the cilium manifest does not carry\n  %s", want)
+		}
+	}
+	if strings.Contains(string(m), "path: /var/run") {
+		t.Error("the cilium manifest still places the hostPath state under /var/run (the image has no /var/run symlink; the state goes under /run)")
+	}
+}
+
+// The directories the CNI needs under /run differ by plugin, and /run is a
+// tmpfs: the directories must be created every boot, for the plugin selected.
+// A flannel directory on a cilium node is harmless but wrong, and a missing
+// one is a node that cannot configure its pod sandboxes.
+func TestCNIRunDirsPerPlugin(t *testing.T) {
+	cases := map[string][]string{
+		vatescfg.CNIFlannel: {"/run/flannel"},
+		vatescfg.CNICilium:  {"/run/cilium", "/run/netns"},
+		vatescfg.CNINone:    nil,
+	}
+	for plugin, want := range cases {
+		if got := CNIRunDirs(plugin); !slices.Equal(got, want) {
+			t.Errorf("CNIRunDirs(%q) = %v, want %v", plugin, got, want)
+		}
+	}
+}
+
 // fakeRunner records what Apply does instead of doing it.
 type fakeRunner struct {
 	dirs     []string
 	writes   []string
 	commands []string
+	// writeContent holds what WriteFile was given for each path, so a test can
+	// assert on the file, not merely that one was written.
+	writeContent map[string][]byte
 	// failOn makes Run fail for any command whose joined form contains it.
 	failOn string
+	// healthz makes the API server probe answer "ok", as a started server does,
+	// so the bootstrap stage can be exercised instead of spending its wait on a
+	// fake that would never answer.
+	healthz bool
 	// bootstrapped makes Stat report the bootstrap marker as present, as on a
 	// control plane that has already run its kubeadm phases once.
 	bootstrapped bool
@@ -753,6 +913,10 @@ func (f *fakeRunner) MkdirAll(path string, mode os.FileMode) error {
 }
 func (f *fakeRunner) WriteFile(path string, mode os.FileMode, content []byte) error {
 	f.writes = append(f.writes, path)
+	if f.writeContent == nil {
+		f.writeContent = map[string][]byte{}
+	}
+	f.writeContent[path] = content
 	return nil
 }
 func (f *fakeRunner) Stat(path string) (os.FileInfo, error) {
@@ -769,6 +933,13 @@ func (f *fakeRunner) Run(name string, args ...string) ([]byte, error) {
 	f.commands = append(f.commands, joined)
 	if f.failOn != "" && strings.Contains(joined, f.failOn) {
 		return nil, os.ErrPermission
+	}
+	// The API server probe answers as a started server.
+	if strings.Contains(joined, "/healthz") {
+		if f.healthz {
+			return []byte("ok\n"), nil
+		}
+		return nil, os.ErrClosed
 	}
 	return nil, nil
 }
@@ -1390,8 +1561,8 @@ func TestARegistryMirrorReachesEveryImageWeRender(t *testing.T) {
 	// half still tries to reach the internet, which on a cluster without it is a
 	// pull that hangs rather than an error that names the problem.
 	//
-	// So this asserts the three places an image reference is produced: kubeadm's
-	// own images, flannel, and kube-vip.
+	// So this asserts the places an image reference is produced: kubeadm's own
+	// images, flannel, cilium, and kube-vip.
 	mirrored := masterDoc + `
 registry:
   kubernetes: "harbor.vates.local/k8s"
@@ -1400,6 +1571,8 @@ registry:
       replace: "harbor.vates.local/mirror/ghcr.io"
     - host: docker.io
       replace: "harbor.vates.local/mirror/docker.io"
+    - host: quay.io
+      replace: "harbor.vates.local/mirror/quay.io"
 `
 	cfg := loadConfig(t, mirrored)
 
@@ -1432,7 +1605,25 @@ registry:
 		}
 	}
 
-	// 3. kube-vip.
+	// 3. Cilium's agent and operator, on a node that selects it.
+	ciliumCfg := loadConfig(t, strings.Replace(mirrored, "plugin: flannel", "plugin: cilium", 1))
+	cilium, err := CiliumManifest(ciliumCfg)
+	if err != nil {
+		t.Fatalf("CiliumManifest() failed: %v", err)
+	}
+	for _, want := range []string{
+		`image: "harbor.vates.local/mirror/quay.io/cilium/cilium:v1.20.1@sha256:ae9ea21f7427fe24bc6ea7247eb552157a1b0a431744045d3f641545ca71d11b"`,
+		`image: "harbor.vates.local/mirror/quay.io/cilium/operator-generic:v1.20.1@sha256:6c3885fc7b629099fdbe2a5c87869c86feb825fa18fae299eac0f61918d16ecf"`,
+	} {
+		if !strings.Contains(string(cilium), want) {
+			t.Errorf("the cilium manifest does not carry\n  %s", want)
+		}
+	}
+	if strings.Contains(string(cilium), `image: "quay.io/`) {
+		t.Errorf("the cilium manifest kept an unrewritten quay.io image:\n%s", cilium)
+	}
+
+	// 4. kube-vip.
 	kubevip, err := KubeVIPManifest("192.0.2.9", "eth0", "6443", SuperAdminKubeconfig, "192.0.2.1",
 		cfg.ImageFor(KubeVIPImage))
 	if err != nil {
@@ -1467,6 +1658,20 @@ func TestWithoutAMirrorNothingIsRewritten(t *testing.T) {
 	} {
 		if !strings.Contains(string(flannel), want) {
 			t.Errorf("the flannel manifest lost its upstream image:\n  %s", want)
+		}
+	}
+
+	ciliumCfg := loadConfig(t, strings.Replace(masterDoc, "plugin: flannel", "plugin: cilium", 1))
+	cilium, err := CiliumManifest(ciliumCfg)
+	if err != nil {
+		t.Fatalf("CiliumManifest() failed: %v", err)
+	}
+	for _, want := range []string{
+		`image: "quay.io/cilium/cilium:v1.20.1@sha256:ae9ea21f7427fe24bc6ea7247eb552157a1b0a431744045d3f641545ca71d11b"`,
+		`image: "quay.io/cilium/operator-generic:v1.20.1@sha256:6c3885fc7b629099fdbe2a5c87869c86feb825fa18fae299eac0f61918d16ecf"`,
+	} {
+		if !strings.Contains(string(cilium), want) {
+			t.Errorf("the cilium manifest lost its upstream image:\n  %s", want)
 		}
 	}
 }

@@ -81,12 +81,14 @@ case "${DASHBOARD}" in
   *) echo "FATAL: DASHBOARD=${DASHBOARD} is not one of tui, gui" >&2; exit 1 ;;
 esac
 
-# The cluster's CNI. flannel is installed by the node itself. cilium means the
-# node installs none (cni.plugin: none) and kube-proxy is omitted, and the
-# harness installs Cilium from the host once the API answers -- see
-# test/cilium.sh and docs/ARCHITECTURE.md.
+# The cluster's CNI, chosen in the node document: flannel is the default, and
+# cilium is installed by the node itself the same way (its manifest, pinned, is
+# embedded in the image and applied at bootstrap). Neither replaces kube-proxy.
 #
 #   CNI=cilium make cluster
+#
+# Bringing up Cilium on a cluster whose nodes do not install it is a manual
+# retrofit, covered by test/cilium.sh (make cilium).
 CNI="${CNI:-flannel}"
 case "${CNI}" in
   flannel|cilium) ;;
@@ -243,15 +245,10 @@ write_drive() {
 "
   fi
 
-  # The CNI block differs for Cilium: the node installs no CNI (cni.plugin:
-  # none) and kubeadm is told not to install kube-proxy, which Cilium replaces.
-  local cni_plugin="flannel" proxy_block=""
-  if [ "${CNI}" = "cilium" ]; then
-    cni_plugin="none"
-    proxy_block="  proxy:
-    disabled: true
-"
-  fi
+  # The CNI the node installs itself, stated in its document. Both are
+  # applied by the node at bootstrap -- see internal/firstboot -- and both
+  # run alongside kube-proxy, so nothing else in the document changes.
+  local cni_plugin="${CNI}"
 
   local doc
   doc="$(cat <<EOF
@@ -260,7 +257,7 @@ kubernetes:
   version: ${K8S_VERSION}
 cluster:
   controlPlaneEndpoint: "${ENDPOINT}"
-${proxy_block}${extra}${vip_block}network:
+${extra}${vip_block}network:
   iface: eth0
   mode: dhcp
 cni:
@@ -440,17 +437,6 @@ do_up() {
     die "${CP_NODES[0]}'s management API never answered"
   }
   ts "address ${cp1_ip}; kubeconfig fetched over the API"
-
-  # A CNI the node does not install is installed here, from the host, once the
-  # API answers. The node stays NotReady -- and so the wait below would time out
-  # -- until it is up, which is the contract of cni.plugin: none.
-  if [ "${CNI}" = "cilium" ]; then
-    say "installing Cilium (the cluster's CNI)"
-    WORK="${WORK}" CLUSTER="${CLUSTER}" VIP="${VIP}" \
-      KUBE_PROXY_REPLACEMENT="${KUBE_PROXY_REPLACEMENT:-true}" \
-      "${ROOT}/test/cilium.sh" "${CP_NODES[0]}" \
-      || die "Cilium did not come up"
-  fi
 
   # A single-node control plane comes up on its own; wait for the API server
   # before asking it for anything.
