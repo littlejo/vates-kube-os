@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/vatesfr/vates-kube-os/internal/dashboard"
-	"github.com/vatesfr/vates-kube-os/internal/display/gui/cairo"
+	"github.com/vatesfr/vates-kube-os/internal/display/gui/render"
 	"github.com/vatesfr/vates-kube-os/internal/display/gui/drm"
 	"github.com/vatesfr/vates-kube-os/internal/hostinfo"
 	"github.com/vatesfr/vates-kube-os/internal/kubeapi"
@@ -61,25 +61,25 @@ type frame struct {
 
 // fonts is every face this screen uses, resolved once.
 type fonts struct {
-	hostname cairo.Font
-	label    cairo.Font
-	value    cairo.Font
-	note     cairo.Font
-	pill     cairo.Font
-	section  cairo.Font
-	event    cairo.Font
-	footer   cairo.Font
+	hostname render.Font
+	label    render.Font
+	value    render.Font
+	note     render.Font
+	pill     render.Font
+	section  render.Font
+	event    render.Font
+	footer   render.Font
 }
 
 // screen owns the display, the drawing state and the layout.
 type screen struct {
 	display *drm.Display
-	surface cairo.Surface
-	ctx     *cairo.Context
+	surface render.Surface
+	ctx     *render.Context
 	w, h    int
 	scale   float64
 
-	logo  cairo.Surface
+	logo  render.Surface
 	fonts fonts
 
 	snap dashboard.Snapshot
@@ -171,12 +171,12 @@ func Run(collect Collector, opts Options) error {
 	// Xen Orchestra's Cirrus VGA gives 800x600 or less -- so the screen measures
 	// itself and everything scales from there.
 	s.scale = scaleFor(s.w, s.h)
-	s.surface = cairo.SurfaceOn(display.Memory(), display.Width(), display.Height(), display.Stride())
+	s.surface = render.SurfaceOn(display.Memory(), display.Width(), display.Height(), display.Stride())
 	if !s.surface.Valid() {
-		return fmt.Errorf("console: cairo refused the screen buffer")
+		return fmt.Errorf("console: could not lay a buffer over the screen")
 	}
 	defer s.surface.Destroy()
-	s.ctx = cairo.New(s.surface)
+	s.ctx = render.New(s.surface)
 	defer s.ctx.Free()
 
 	if os.Getenv("VATES_WHEEL_DEBUG") != "" {
@@ -192,7 +192,7 @@ func Run(collect Collector, opts Options) error {
 	// Fill before drawing anything: what is in the buffer before the first write
 	// is the firmware's, or the previous program's.
 	s.fillBackground()
-	display.Present()
+	s.present()
 
 	wheel := drm.OpenWheel(s.w, s.h)
 	defer wheel.Close()
@@ -213,18 +213,18 @@ func Run(collect Collector, opts Options) error {
 	go collectLoop(collect, opts.Interval, frames)
 
 	s.redraw()
-	display.Present()
+	s.present()
 
 	for {
 		select {
 		case f := <-frames:
 			s.apply(f)
 			s.redraw()
-			display.Present()
+		s.present()
 		case e := <-watched:
 			if s.addWatched(e) {
 				s.redraw()
-				display.Present()
+			s.present()
 			}
 		case lines := <-wheel.Steps():
 			// Coalesce the burst, then present at most once per display frame.
@@ -356,38 +356,56 @@ func collectLoop(collect Collector, interval time.Duration, out chan frame) {
 
 func (s *screen) loadFonts() {
 	s.fonts = fonts{
-		hostname: s.font("Poppins Bold", 16),
+		hostname: s.face(16, faceHostname),
 		// The all-caps faces are drawn in the "Poppins Vates" logotype subset,
 		// which carries A-Z and nothing else: it is the brand's display face and
 		// it fits these strings (tile labels, EVENTS, READY/STARTING/NOT READY).
 		// Anything with lowercase or digits must use Poppins proper, or the
 		// subset would fall back mid-word -- hence the split.
-		label:   s.font("Poppins Vates", 9),
-		value:   s.font("Poppins Semi-Bold", baseValue),
-		note:    s.font("Poppins", 10),
-		pill:    s.font("Poppins Vates", 14),
-		section: s.font("Poppins Vates", 12),
-		event:   s.font("DejaVu Sans Mono", 11),
-		footer:  s.font("Poppins", 11),
+		label:   s.face(9, faceLabel),
+		value:   s.face(baseValue, faceValue),
+		note:    s.face(10, faceNote),
+		pill:    s.face(14, faceLabel),
+		section: s.face(12, faceLabel),
+		event:   s.face(11, faceEvent),
+		footer:  s.face(11, faceNote),
 	}
 }
 
-// font builds a face whose size follows the screen. The sizes above are the ones
+// The dashboard's faces, as FILES. There is no fontconfig any more: the image
+// installs the fonts at these paths (recipes/console/dejavu.sh, poppins.sh), and
+// every entry falls back to a DejaVu face so that a checkout, or a machine that
+// does not carry Poppins, still draws text.
+var (
+	faceHostname = []string{"poppins/Poppins-Bold.ttf", "truetype/poppins/Poppins-Bold.ttf", "dejavu/DejaVuSans-Bold.ttf", "truetype/dejavu/DejaVuSans-Bold.ttf"}
+	faceLabel    = []string{"poppins-vates/poppins_vates-webfont.ttf", "truetype/poppins/poppins_vates-webfont.ttf", "poppins/Poppins-Regular.ttf", "truetype/poppins/Poppins-Regular.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf"}
+	faceValue    = []string{"poppins/Poppins-SemiBold.ttf", "truetype/poppins/Poppins-SemiBold.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf"}
+	faceNote     = []string{"poppins/Poppins-Regular.ttf", "truetype/poppins/Poppins-Regular.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf"}
+	faceEvent    = []string{"dejavu/DejaVuSansMono.ttf", "truetype/dejavu/DejaVuSansMono.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf"}
+)
+
+// face builds a face whose size follows the screen. The sizes above are the ones
 // the dashboard was drawn at; scale grows or shrinks them with the display. The
-// floor of one keeps pango from being handed a size of zero on a tiny screen.
-func (s *screen) font(family string, size float64) cairo.Font {
+// floor of one keeps a tiny screen from asking for a size of zero.
+func (s *screen) face(size float64, candidates []string) render.Font {
 	px := size * s.scale
 	if px < 1 {
 		px = 1
 	}
-	return cairo.NewFont(fmt.Sprintf("%s %.0f", family, px))
+	paths := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		if p := render.FindFont(name); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return render.LoadFirstFont(px, paths...)
 }
 
 // loadLogo reads the wordmark, if it is where the caller says it might be. A
 // missing logo costs a picture, not the screen.
 func (s *screen) loadLogo(dirs []string) {
 	if path := findAsset(dirs, "vates-name-baseline-white.png"); path != "" {
-		s.logo = cairo.PNG(path)
+		s.logo = render.PNG(path)
 	}
 }
 
@@ -639,6 +657,22 @@ func (s *screen) fillBackground() {
 	s.ctx.RGB(0, 0, 0)
 	s.ctx.Rect(0, 0, float64(s.w), float64(s.h))
 	s.ctx.Fill()
+}
+
+// present writes the frame from our own image into the screen buffer and tells
+// the kernel it changed. gg rasterizes into an image.RGBA, not into the mapped
+// memory, so Flush is what actually puts pixels on the screen.
+func (s *screen) present() {
+	s.surface.Flush()
+	s.display.Present()
+}
+
+// presentRect is present for a rectangle: only that part is copied and declared
+// changed, which is what keeps a scroll from handing the whole framebuffer back
+// to the host.
+func (s *screen) presentRect(x, y, w, h int) {
+	s.surface.FlushRect(x, y, w, h)
+	s.display.PresentRect(x, y, w, h)
 }
 
 // findAsset looks for a file in the directories given, in order.

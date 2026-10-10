@@ -199,7 +199,7 @@ type Dashboard struct {
 	// Mode is "tui" or "gui". Optional; defaults to "gui".
 	//
 	//   gui   the graphical dashboard, full screen, drawn straight onto the
-	//         screen with cairo. The default: it is what a machine with a screen
+	//         screen with fogleman/gg. The default: it is what a machine with a screen
 	//         should show, and it falls back to the text one when there is no
 	//         DRM device or the renderer cannot take the screen.
 	//   tui   the text dashboard: no dependency, works on any console, and the

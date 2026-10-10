@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/vatesfr/vates-kube-os/internal/dashboard"
-	"github.com/vatesfr/vates-kube-os/internal/display/gui/cairo"
+	"github.com/vatesfr/vates-kube-os/internal/display/gui/render"
 )
 
 // cardColumns is how many tiles fit on a row. Five, as the windowed console had:
@@ -90,7 +90,9 @@ func (s *screen) drawHeader() {
 	s.setColour(pillFill)
 	s.ctx.Rounded(float64(pillX), float64(pillY), float64(pillW), float64(pillH), float64(pillH)/2)
 	s.ctx.Fill()
-	s.textAt(s.fonts.pill, pillInk, pillText, pillX+(pillW-pw)/2, pillY+(pillH-ph)/2, 0)
+	// Centred on the ink, not the line box: the logotype subset's ascent is
+	// taller than its line height, and the box would leave the capitals low.
+	s.ctx.TextCentered(s.fonts.pill, span(pillInk, pillText), pillX, pillY, pillW, pillH)
 
 	name := s.snap.Node.Metadata.Name
 	if name == "" {
@@ -214,12 +216,12 @@ func (s *screen) drawFooter() {
 
 // textAt draws plain text in a colour, wrapping inside width when it is given
 // one, and returns the height it took.
-func (s *screen) textAt(f cairo.Font, colour uint32, text string, x, y, width int) int {
+func (s *screen) textAt(f render.Font, colour uint32, text string, x, y, width int) int {
 	return s.ctx.Text(f, span(colour, text), x, y, width)
 }
 
 // textLineAt draws plain text on ONE line, ellipsised at the given width.
-func (s *screen) textLineAt(f cairo.Font, colour uint32, text string, x, y, width int) int {
+func (s *screen) textLineAt(f render.Font, colour uint32, text string, x, y, width int) int {
 	return s.ctx.TextLine(f, span(colour, text), x, y, width)
 }
 

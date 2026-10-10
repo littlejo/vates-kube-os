@@ -38,10 +38,9 @@ import (
 // collector: the console is one program with two faces.
 //
 // The picture used to be a GTK window under a compositor. It is now drawn with
-// cairo into the screen's own buffer -- no toolkit, no compositor, 23 MB and
-// half a percent of a core to scroll where GTK cost 83 MB and two thirds of one.
-// The GTK face was removed with it; what it knew is in internal/display/gui and
-// internal/dashboard now.
+// fogleman/gg into an image of its own, blitted into the screen's buffer -- no
+// toolkit, no compositor. The GTK face was removed with it; what it knew is in
+// internal/display/gui and internal/dashboard now.
 const (
 	// The kubeconfig of the kubelet, which exists on every node -- control
 	// plane and worker alike -- and authenticates as system:node:<name>. Using

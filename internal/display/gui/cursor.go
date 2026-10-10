@@ -45,7 +45,7 @@ func (s *screen) restoreCursor() {
 	}
 	s.blit(c.bg, c.bx, c.by, cursorW, cursorH, false)
 	c.saved = false
-	s.ctx.MarkDirty(s.surface)
+	s.surface.FlushRect(c.bx, c.by, cursorW, cursorH)
 }
 
 // drawCursor saves what is under the arrow and draws it.
@@ -68,7 +68,7 @@ func (s *screen) drawCursor() {
 	s.ctx.Fill()
 	s.setColour(colourBlack)
 	s.ctx.Stroke(1)
-	s.ctx.MarkDirty(s.surface)
+	s.surface.FlushRect(c.x, c.y, cursorW, cursorH)
 }
 
 // moveCursor takes the pointer where the mouse says it is. It reports nothing:
@@ -108,11 +108,11 @@ func (s *screen) moveCursor() {
 	s.display.PresentRect(x0, y0, x1-x0, y1-y0)
 }
 
-// blit copies a rectangle between the screen and a buffer, one scanline at a
-// time because the stride is the screen's, not the rectangle's.
+// blit copies a rectangle between the drawing image and a buffer, one scanline
+// at a time because the stride is the image's, not the rectangle's.
 func (s *screen) blit(buf []byte, x, y, w, h int, fromScreen bool) {
-	mem := s.display.Pixels()
-	stride := s.display.Stride()
+	mem := s.surface.Pix()
+	stride := s.surface.Stride()
 	rowBytes := w * 4
 	for row := range h {
 		off := (y+row)*stride + x*4

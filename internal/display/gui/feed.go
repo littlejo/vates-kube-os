@@ -295,13 +295,11 @@ func (s *screen) drawFeedBand(y0, y1 int) {
 	}
 	top, bottom := s.offset+y0, s.offset+y1
 
-	s.ctx.Save()
 	x0 := float64(s.feedX + s.padH)
 	y0f := float64(s.feedY + s.padV + y0)
 	w := float64(s.feedInnerW)
 	h := float64(y1 - y0)
-	s.ctx.Rect(x0, y0f, w, h)
-	s.ctx.Clip()
+	s.ctx.ClipRect(x0, y0f, w, h)
 	s.setColour(colourPanelFill)
 	s.ctx.Rect(x0, y0f, w, h)
 	s.ctx.Fill()
@@ -317,7 +315,7 @@ func (s *screen) drawFeedBand(y0, y1 int) {
 		}
 		s.ctx.Text(s.fonts.event, l.markup, x, s.feedY+s.padV+l.y-s.offset, s.feedInnerW)
 	}
-	s.ctx.Restore()
+	s.ctx.ResetClip()
 }
 
 // scroll moves the feed by delta pixels: positive is towards the newest.
@@ -361,23 +359,21 @@ func (s *screen) scroll(delta int) {
 		s.drawFeed()
 		s.drawScrollbar()
 		s.drawCursor()
-		s.display.PresentRect(s.panelX, s.panelY, s.panelW, s.panelH)
+		s.presentRect(s.panelX, s.panelY, s.panelW, s.panelH)
 		return
 	}
 
-	// Cairo has been drawing into this memory; tell it the pixels are about to
-	// be moved underneath it, and again once they have been.
-	s.ctx.Flush(s.surface)
+	// The pixels already drawn are moved inside our own image, and only the
+	// strip the move exposes is laid out again.
 	if shift > 0 {
 		// Content down: every row takes what was above it, and the top is
 		// exposed.
-		s.display.MoveRows(s.feedX+s.padH, s.feedY+s.padV, s.feedInnerW, s.feedInnerH-exposed, exposed)
+		s.surface.MoveRows(s.feedX+s.padH, s.feedY+s.padV, s.feedInnerW, s.feedInnerH-exposed, exposed)
 	} else {
 		// Content up: every row takes what was below it, and the bottom is
 		// exposed.
-		s.display.MoveRows(s.feedX+s.padH, s.feedY+s.padV+exposed, s.feedInnerW, s.feedInnerH-exposed, -exposed)
+		s.surface.MoveRows(s.feedX+s.padH, s.feedY+s.padV+exposed, s.feedInnerW, s.feedInnerH-exposed, -exposed)
 	}
-	s.ctx.MarkDirty(s.surface)
 
 	if shift > 0 {
 		s.drawFeedBand(0, exposed)
@@ -391,5 +387,5 @@ func (s *screen) scroll(delta int) {
 	// back to the host on every notch. The arrow, when it is over the panel, is
 	// inside this rectangle; when it is not, restoring and redrawing it left its
 	// pixels exactly as they were.
-	s.display.PresentRect(s.panelX, s.panelY, s.panelW, s.panelH)
+	s.presentRect(s.panelX, s.panelY, s.panelW, s.panelH)
 }

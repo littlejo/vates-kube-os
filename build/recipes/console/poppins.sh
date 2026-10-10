@@ -2,14 +2,14 @@
 # under the SIL Open Font License. Two things are installed:
 #
 #   - the full Poppins 4.003 family (Google Fonts build): the text faces. The
-#     dashboard asks for Poppins Bold / Semi-Bold / regular; without them,
-#     fontconfig falls back to DejaVu and the console is not the brand's.
+#     dashboard loads them by path (internal/display/gui/render); without them it
+#     falls back to DejaVu and the console is not the brand's.
 #   - "Poppins Vates", the custom logotype variant Vates publishes. It is a
 #     SUBSET -- uppercase A-Z, a space and an icon, no lowercase, no digits --
 #     so it is fit for the all-caps labels only (tile labels, EVENTS, the state
 #     pill), never for text. Kept beside the family, not merged into it.
 #
-# Pure data: no build, just install the TTFs; fontconfig picks them up from
+# Pure data: no build, just install the TTFs; the console finds them under
 # /usr/share/fonts. The URLs and hashes arrive as build ARGs set in the
 # Containerfile rather than as pins.conf entries, so that adding the font does
 # not invalidate the expensive libc layer.

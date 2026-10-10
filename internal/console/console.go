@@ -48,10 +48,10 @@ func Console(argv []string) error {
 	case "tui":
 		return textDashboard()
 	case "gui":
-		// The graphical console draws straight into the screen's own buffer.
-		// There is no compositor, no session and no seat: cairo writes where the
-		// display controller reads, and scrolling is a memory copy. Measured on
-		// a node, against the GTK window that ran under cage before it:
+		// The graphical console draws into an image of its own and blits it
+		// into the screen's buffer. There is no compositor, no session and no
+		// seat, and scrolling is a memory copy. Measured on a node, against the
+		// GTK window that ran under cage before it:
 		//
 		//   cage + GTK   83 MB, 51 to 67 % of a core to scroll
 		//   this         23 MB, 0.5 %

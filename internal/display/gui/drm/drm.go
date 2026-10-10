@@ -324,7 +324,8 @@ func (d *Display) Width() int  { return d.width }
 func (d *Display) Height() int { return d.height }
 func (d *Display) Stride() int { return d.stride }
 
-// Memory is the buffer the controller reads: cairo draws straight into it.
+// Memory is the buffer the controller reads: the console's image is blitted
+// straight into it.
 func (d *Display) Memory() unsafe.Pointer { return unsafe.Pointer(&d.mem[0]) }
 
 // Pixels is the whole buffer, row by row, with the padding the stride leaves.
