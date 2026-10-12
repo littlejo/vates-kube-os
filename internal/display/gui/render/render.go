@@ -20,7 +20,7 @@ type Context struct {
 	// applied to text by drawing into a sub-image of the frame, which the font
 	// drawer clips at its bounds for free. Shapes drawn while it is set are the
 	// band's own fill, which is the clip, so they need no help.
-	clip    *image.Rectangle
+	clip *image.Rectangle
 }
 
 // New prepares a context on a surface.

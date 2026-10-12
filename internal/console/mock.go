@@ -139,4 +139,3 @@ func mockHost(info hostinfo.Info) hostinfo.Info {
 	info.Load = [3]float64{0.03, 0.07, 0.08}
 	return info
 }
-

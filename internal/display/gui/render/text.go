@@ -145,10 +145,10 @@ const useDefault = 0x1_000000 // outside the 24-bit palette
 // mean a raw '<' or '&' cannot reach here as anything but a tag or an entity.
 func parseMarkup(s string, def uint32) []span {
 	var (
-		out     []span
-		cur     uint32 = useDefault
-		buf     strings.Builder
-		flush         = func() {
+		out   []span
+		cur   uint32 = useDefault
+		buf   strings.Builder
+		flush = func() {
 			if buf.Len() == 0 {
 				return
 			}

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/vatesfr/vates-kube-os/internal/dashboard"
-	"github.com/vatesfr/vates-kube-os/internal/display/gui/render"
 	"github.com/vatesfr/vates-kube-os/internal/display/gui/drm"
+	"github.com/vatesfr/vates-kube-os/internal/display/gui/render"
 	"github.com/vatesfr/vates-kube-os/internal/hostinfo"
 	"github.com/vatesfr/vates-kube-os/internal/kubeapi"
 )
@@ -220,11 +220,11 @@ func Run(collect Collector, opts Options) error {
 		case f := <-frames:
 			s.apply(f)
 			s.redraw()
-		s.present()
+			s.present()
 		case e := <-watched:
 			if s.addWatched(e) {
 				s.redraw()
-			s.present()
+				s.present()
 			}
 		case lines := <-wheel.Steps():
 			// Coalesce the burst, then present at most once per display frame.
