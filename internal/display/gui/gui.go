@@ -388,9 +388,9 @@ var (
 // the dashboard was drawn at; scale grows or shrinks them with the display. The
 // floor of one keeps a tiny screen from asking for a size of zero.
 func (s *screen) face(size float64, candidates []string) render.Font {
-	px := size * s.scale
-	if px < 1 {
-		px = 1
+	pt := size * s.scale
+	if pt < 1 {
+		pt = 1
 	}
 	paths := make([]string, 0, len(candidates))
 	for _, name := range candidates {
@@ -398,7 +398,7 @@ func (s *screen) face(size float64, candidates []string) render.Font {
 			paths = append(paths, p)
 		}
 	}
-	return render.LoadFirstFont(px, paths...)
+	return render.LoadFirstFont(pt, paths...)
 }
 
 // loadLogo reads the wordmark, if it is where the caller says it might be. A

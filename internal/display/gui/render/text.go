@@ -14,10 +14,10 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
-// Font is a face resolved once: a TTF, a size in pixels, and the metrics the
-// layout needs. A face is a FILE: the callers know the paths (the image installs
-// them at fixed locations), which is also why a missing one degrades to no text
-// rather than to a panic.
+// Font is a face resolved once: a TTF and the metrics the layout needs. A face
+// is a FILE: the callers know the paths (the image installs them at fixed
+// locations), which is also why a missing one degrades to no text rather than
+// to a panic.
 type Font struct {
 	face   font.Face
 	ascent float64
@@ -25,10 +25,10 @@ type Font struct {
 	valid  bool
 }
 
-// LoadFont reads a TTF and resolves it at a pixel size. Size is in pixels: the
-// DPI is 72, so a point is a pixel and the dashboard's numbers mean what they
-// look like. A file that cannot be read or parsed yields an invalid Font, whose
-// text methods draw nothing.
+// LoadFont reads a TTF and resolves it at a point size. Size is in points at 96
+// DPI -- the resolution the dashboard's sizes were authored against -- so a
+// size of 16 is an em of 21 pixels, not 16. A file that cannot be read or
+// parsed yields an invalid Font, whose text methods draw nothing.
 func LoadFont(path string, size float64) Font {
 	if path == "" || size <= 0 {
 		return Font{}
@@ -43,7 +43,7 @@ func LoadFont(path string, size float64) Font {
 	}
 	face := truetype.NewFace(f, &truetype.Options{
 		Size:    size,
-		DPI:     72,
+		DPI:     96,
 		Hinting: font.HintingFull,
 	})
 	m := face.Metrics()
