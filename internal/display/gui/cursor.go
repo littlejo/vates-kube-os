@@ -3,13 +3,10 @@ package gui
 // The cursor. There is no compositor and no display server: nothing draws a
 // pointer unless this does, and nothing holds its position unless this keeps it.
 //
-// It is a SOFTWARE cursor, which means it must put back what it covers. That is
-// not a detail -- it is the whole problem. cage, which used to draw one for us,
-// painted the arrow without repainting the spot it left, and the result was a
-// line of arrows across the tiles and the feed: reported twice as a display
-// glitch before anyone recognised a stale cursor. The fix there was to change
-// the compositor's renderer. Here the fix is to save the pixels under the
-// pointer and restore them before drawing it somewhere else.
+// It is a SOFTWARE cursor, which means it must put back what it covers: save the
+// pixels under the pointer and restore them before drawing it somewhere else. A
+// cursor painted without repainting the spot it left becomes a line of arrows
+// across the tiles and the feed -- a stale cursor.
 //
 // And it must be restored before ANY drawing that touches its rectangle --
 // a scroll moves the feed underneath it, and a cursor drawn on top would be

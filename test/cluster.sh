@@ -69,7 +69,7 @@ WORKERS="${WORKERS:-3}"
 
 # What the console shows, per machine. tui by default -- it works everywhere,
 # including on a serial console where nothing else can run. gui draws the same
-# thing as a picture, under cage, and needs a screen:
+# thing as a picture and needs a screen:
 #
 #   DASHBOARD=gui make cluster
 #

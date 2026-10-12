@@ -13,8 +13,7 @@ import (
 //   - the SCREEN, made over the DRM buffer with SurfaceOn. gg draws into an
 //     image.RGBA of its own, and the DRM memory is written from it on Flush:
 //     the screen is XRGB8888 in memory (B, G, R, X), an image.RGBA is R, G, B,
-//     A, so one channel swap happens on the way out. That copy is the price of
-//     not sharing cairo's byte-order-encoded surface, and it is a few
+//     A, so one channel swap happens on the way out. The copy costs a few
 //     megabytes a frame.
 //
 //   - an IMAGE loaded from a file (PNG), for the wordmark and the planet.
@@ -84,8 +83,7 @@ func (s Surface) Stride() int { return s.img.Stride }
 // Pix is the image's pixels, R, G, B, A, row by row.
 func (s Surface) Pix() []byte { return s.img.Pix }
 
-// Destroy exists for the call sites the cairo surface had. Go's collector owns
-// the memory now, so it is a no-op.
+// Destroy is a no-op: Go's collector owns the memory.
 func (s Surface) Destroy() {}
 
 // Flush writes the whole image into the screen buffer.
@@ -141,7 +139,7 @@ func moveRows(pix []byte, stride, x, y, w, h, dy int) {
 			copy(pix[dst:dst+rowBytes], pix[src:src+rowBytes])
 		}
 	default:
-		for i := 0; i < h; i++ {
+		for i := range h {
 			src := (y+i)*stride + x*4
 			dst := (y+i+dy)*stride + x*4
 			if src < 0 || dst < 0 || dst+rowBytes > len(pix) || src+rowBytes > len(pix) {

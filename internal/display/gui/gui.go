@@ -372,10 +372,10 @@ func (s *screen) loadFonts() {
 	}
 }
 
-// The dashboard's faces, as FILES. There is no fontconfig any more: the image
-// installs the fonts at these paths (recipes/console/dejavu.sh, poppins.sh), and
-// every entry falls back to a DejaVu face so that a checkout, or a machine that
-// does not carry Poppins, still draws text.
+// The dashboard's faces, as FILES. The image installs the fonts at these paths
+// (recipes/console/dejavu.sh, poppins.sh), and every entry falls back to a
+// DejaVu face so that a checkout, or a machine that does not carry Poppins,
+// still draws text.
 var (
 	faceHostname = []string{"poppins/Poppins-Bold.ttf", "truetype/poppins/Poppins-Bold.ttf", "dejavu/DejaVuSans-Bold.ttf", "truetype/dejavu/DejaVuSans-Bold.ttf"}
 	faceLabel    = []string{"poppins-vates/poppins_vates-webfont.ttf", "truetype/poppins/poppins_vates-webfont.ttf", "poppins/Poppins-Regular.ttf", "truetype/poppins/Poppins-Regular.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf"}

@@ -82,7 +82,7 @@ func (s *screen) drawHeader() {
 
 	// The pill first: its width is what the centre has to fit between.
 	pillText, pillFill, pillInk := s.pillState()
-	pw, ph := s.ctx.MeasureSize(s.fonts.pill, dashboard.PangoEscape(pillText), 0)
+	pw, ph := s.ctx.MeasureSize(s.fonts.pill, dashboard.MarkupEscape(pillText), 0)
 	pillW, pillH := pw+s.u(32), ph+s.u(10)
 	pillX := s.w - s.padding - pillW
 	pillY := s.headerTop + (s.headerH-pillH)/2
@@ -105,7 +105,7 @@ func (s *screen) drawHeader() {
 		// dropped, because the pill says the state and the mark says the brand.
 		return
 	}
-	tw, _ := s.ctx.MeasureSize(s.fonts.hostname, dashboard.PangoEscape(name), 0)
+	tw, _ := s.ctx.MeasureSize(s.fonts.hostname, dashboard.MarkupEscape(name), 0)
 	x := left + (right-left-tw)/2
 	x = max(x, left)
 	s.textLineAt(s.fonts.hostname, colourCream, name, x, s.headerTop+(s.headerH-s.u(34))/2, right-x)
@@ -158,18 +158,18 @@ func (s *screen) drawTiles() {
 		// the small one visibly.
 		noteW := 0
 		if t.Note != "" {
-			nw, _ := s.ctx.MeasureSize(s.fonts.note, dashboard.PangoEscape(t.Note), 0)
+			nw, _ := s.ctx.MeasureSize(s.fonts.note, dashboard.MarkupEscape(t.Note), 0)
 			noteW = nw + s.u(6)
 		}
 		vy := y + s.u(24)
-		vw, vh := s.ctx.MeasureSize(s.fonts.value, dashboard.PangoEscape(t.Value), 0)
+		vw, vh := s.ctx.MeasureSize(s.fonts.value, dashboard.MarkupEscape(t.Value), 0)
 		avail := tileW - 2*inset - noteW
 		if vw > avail {
 			vw = avail
 		}
 		s.textLineAt(s.fonts.value, toneColour(t.Tone), t.Value, x+inset, vy, avail)
 		if t.Note != "" {
-			_, nh := s.ctx.MeasureSize(s.fonts.note, dashboard.PangoEscape(t.Note), 0)
+			_, nh := s.ctx.MeasureSize(s.fonts.note, dashboard.MarkupEscape(t.Note), 0)
 			s.textAt(s.fonts.note, colourNote, t.Note, x+inset+vw+s.u(6), vy+vh-nh, 0)
 		}
 	}
@@ -228,7 +228,7 @@ func (s *screen) textLineAt(f render.Font, colour uint32, text string, x, y, wid
 // span is a coloured run of text, escaped so that a value containing an
 // ampersand or an angle bracket stays data rather than becoming markup.
 func span(colour uint32, text string) string {
-	return `<span foreground="#` + hex(colour) + `">` + dashboard.PangoEscape(text) + `</span>`
+	return `<span foreground="#` + hex(colour) + `">` + dashboard.MarkupEscape(text) + `</span>`
 }
 
 func hex(c uint32) string { return fmt.Sprintf("%06x", c) }

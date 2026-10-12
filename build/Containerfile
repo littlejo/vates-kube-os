@@ -83,10 +83,9 @@ COPY recipes/tools/busybox.sh /build/recipes/tools/busybox.sh
 RUN /build/lib/run-recipe.sh busybox
 
 # --- pass 4: console --------------------------------------------------------
-# The console's fonts. The drawing itself is pure Go now: internal/display/
-# gui/render draws with fogleman/gg and lays out text with the pure-Go freetype,
-# so there is no cairo/pango stack to build -- only the TTF faces the dashboard
-# and the splash load by path.
+# The console's fonts. The drawing is pure Go: internal/display/gui/render draws
+# with fogleman/gg and lays out text with the pure-Go freetype, so this pass
+# ships only the TTF faces the dashboard and the splash load by path.
 FROM tools AS console
 COPY recipes/console/dejavu.sh /build/recipes/console/dejavu.sh
 RUN /build/lib/run-recipe.sh dejavu

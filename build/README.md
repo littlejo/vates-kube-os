@@ -46,8 +46,8 @@ parallel:
 - **pass 3 — tools**: `util-linux, libnftnl, iptables, kmod, e2fsprogs, gptfdisk,
   iproute2, kbd, busybox`
 - **pass 4 — console**: the fonts (`dejavu`, `poppins`). The drawing is pure Go
-  (`internal/display/gui/render`, fogleman/gg), so there is no cairo/pango stack
-  to build any more.
+  (`internal/display/gui/render`, fogleman/gg); this pass ships the TTF faces
+  the console loads.
 - **pass 1 — kernel**: `linux` + the fragment (independent; builds alongside)
 - **pass 5 — runtime**: `containerd, runc` and the CNI plugins, from upstream
   release artifacts

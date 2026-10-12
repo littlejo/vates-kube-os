@@ -15,10 +15,9 @@ import (
 )
 
 // Font is a face resolved once: a TTF, a size in pixels, and the metrics the
-// layout needs. The cairo/pango build asked fontconfig for a family by name;
-// there is no fontconfig any more, so a face is a FILE. The callers know the
-// files (the image installs them at fixed paths), which is also why a missing
-// one degrades to no text rather than to a panic.
+// layout needs. A face is a FILE: the callers know the paths (the image installs
+// them at fixed locations), which is also why a missing one degrades to no text
+// rather than to a panic.
 type Font struct {
 	face   font.Face
 	ascent float64
@@ -100,8 +99,8 @@ var fontRoots = []string{
 
 func (f Font) Valid() bool { return f.valid }
 
-// Free releases the face. The call sites the cairo font had defer it; the
-// garbage collector would do it anyway.
+// Free releases the face. Callers defer it; the garbage collector would do it
+// anyway.
 func (f Font) Free() {
 	if f.face != nil {
 		_ = f.face.Close()
@@ -126,10 +125,10 @@ func (f Font) measure(s string) float64 {
 
 // --- markup -----------------------------------------------------------------
 //
-// The dashboard hands text as Pango markup with colour spans -- that is how the
-// event feed colours its timestamp, its reason column and its message
-// separately. Nothing else parses Pango here: the grammar is the one this
-// project emits, decoded into runs of (text, colour).
+// The dashboard hands text as markup with colour spans -- that is how the event
+// feed colours its timestamp, its reason column and its message separately.
+// Nothing else parses that grammar here: it is the one this project emits,
+// decoded into runs of (text, colour).
 
 // span is a run of text with a colour. A colour of useDefault means "the
 // context's current colour".
@@ -142,7 +141,7 @@ const useDefault = 0x1_000000 // outside the 24-bit palette
 
 // parseMarkup decodes the markup into spans. It understands &amp; &lt; &gt;
 // &quot; &apos; and numeric entities, <span foreground="#rrggbb"> ... </span>,
-// and treats everything else as literal text -- the escapes PangoEscape applies
+// and treats everything else as literal text -- the escapes MarkupEscape applies
 // mean a raw '<' or '&' cannot reach here as anything but a tag or an entity.
 func parseMarkup(s string, def uint32) []span {
 	var (

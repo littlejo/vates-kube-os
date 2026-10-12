@@ -106,8 +106,8 @@ func (c *Context) textDst() *image.RGBA {
 // --- text -------------------------------------------------------------------
 
 // Text lays out markup, wrapping inside wrapWidth when it is given one, and
-// returns the height it took. The text is Pango-style markup: colour spans are
-// honoured, anything without one uses the current colour.
+// returns the height it took. The text is markup: colour spans are honoured,
+// anything without one uses the current colour.
 func (c *Context) Text(f Font, markup string, x, y, wrapWidth int) int {
 	if !f.Valid() {
 		return 0

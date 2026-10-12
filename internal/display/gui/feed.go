@@ -346,8 +346,8 @@ func (s *screen) scroll(delta int) {
 	}
 
 	// The feed is about to move UNDER the arrow. Put the arrow back first, or the
-	// copy below would carry its pixels along with the text -- the trail cage
-	// taught us about, by another route.
+	// copy below would carry its pixels along with the text -- a stale cursor
+	// trail.
 	s.restoreCursor()
 
 	exposed := shift
