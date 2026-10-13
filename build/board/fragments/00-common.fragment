@@ -14,7 +14,9 @@ CONFIG_EFI_STUB=y
 # through /dev/fb0. The node has NO module loader: no udev, no systemd, nothing
 # runs modprobe. A driver built as a module (`=m`, the defconfig default for most
 # of these) is therefore never loaded, and the /dev/dri/card0 the console looks
-# for never appears. Everything here is `=y` on purpose.
+# for never appears. Everything here is `=y` on purpose: the fragments below are
+# the single source of truth for what the node needs -- there is no separate
+# modules-load.d.
 #
 # Framebuffer path (splash, and any fbdev console):
 #   CONFIG_FB                      the framebuffer layer itself
