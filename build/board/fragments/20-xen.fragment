@@ -1,0 +1,41 @@
+# Vates Kube OS — kernel configuration, the Xen / XCP-ng platform.
+#
+# The XCP-ng documentation says the Xen drivers are built into the kernel and
+# only the management agent has to be installed -- true of a distribution, whose
+# kernel was configured for it. This kernel comes from the x86_64 defconfig and
+# carries nothing it was not asked for, so the guest side is turned on here, and
+# =y for the same reason as the rest of this file: there is no module loader.
+#
+# XENFS + XEN_COMPAT_XENFS are what the agent actually needs: they create
+# /proc/xen/xenbus, which xe-daemon opens to reach the hypervisor. XEN_PVHVM is
+# the HVM/PVH guest support Xen Orchestra boots; XEN_PVH additionally allows a
+# PVH boot. Under KVM/libvirt (the test cluster) none of this is used -- the
+# kernel does not detect Xen and stays native.
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_XEN=y
+CONFIG_XEN_PVHVM_GUEST=y
+CONFIG_XEN_PVH=y
+CONFIG_XENFS=y
+CONFIG_XEN_COMPAT_XENFS=y
+#
+# Storage. The PV block frontend is what XCP-ng presents when the guest tools
+# are installed; the emulated IDE/SATA fallback is in 00-common. Without the
+# frontend a PV disk is invisible and the root never mounts.
+CONFIG_XEN_BLKDEV_FRONTEND=y
+#
+# Networking. The PV network frontend, paired with the emulated e1000 fallback
+# in 00-common.
+CONFIG_XEN_NETDEV_FRONTEND=y
+#
+# Console. hvc0 is Xen's console (the cmdline carries console=hvc0); without the
+# HVC frontend the serial/Xen console the node reads from never appears.
+CONFIG_HVC_XEN=y
+CONFIG_HVC_XEN_FRONTEND=y
+#
+# Display. Cirrus, the VGA Xen Orchestra gives a VM by default (the "cirrus"
+# vGPU type). Without it there is no /dev/dri/card0 on such a VM, and
+# vates-console falls back to the text face. The native driver takes over from
+# simpledrm when it binds; simpledrm stays the fallback for a vGPU none of these
+# claims.
+CONFIG_DRM_CIRRUS_QEMU=y

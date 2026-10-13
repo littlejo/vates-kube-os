@@ -105,7 +105,7 @@ RUN /build/lib/run-recipe.sh poppins
 # builder's tools and the kernel headers it already installed) and meets the
 # rest at assembly.
 FROM libc AS kernel
-COPY board/kernel.fragment /build/board/kernel.fragment
+COPY board/fragments /build/board/fragments
 COPY recipes/kernel/linux.sh /build/recipes/kernel/linux.sh
 RUN /build/lib/run-recipe.sh linux
 

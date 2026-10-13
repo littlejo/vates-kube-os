@@ -1,0 +1,22 @@
+# Vates Kube OS — kernel configuration, the KVM/QEMU platform.
+#
+# The paravirt drivers a KVM guest presents, and the vGPUs libvirt and
+# virt-manager offer. Everything =y: there is no module loader, so a driver left
+# as a module is never loaded and the device never appears.
+#
+# Storage. libvirt and virt-manager present the disk as virtio (the default) or
+# as emulated SATA (covered by 00-common). virtio-scsi for SCSI-backed virtio.
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_SCSI=y
+#
+# Networking. virtio-net is the default NIC in virt-manager; the emulated e1000
+# fallback is in 00-common.
+CONFIG_VIRTIO_NET=y
+# virtio over PCI: the transport the block and net devices above sit on.
+CONFIG_VIRTIO_PCI=y
+#
+# Display. The vGPUs QEMU/KVM offer. simpledrm (00-common) is the fallback for a
+# vGPU none of these claims.
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_DRM_BOCHS=y
+CONFIG_DRM_QXL=y

@@ -17,6 +17,7 @@ import (
 	"github.com/vatesfr/vates-kube-os/internal/console/tty"
 	"github.com/vatesfr/vates-kube-os/internal/dashboard"
 	"github.com/vatesfr/vates-kube-os/internal/firstboot"
+	"github.com/vatesfr/vates-kube-os/internal/hostinfo"
 	"github.com/vatesfr/vates-kube-os/internal/update/ab"
 )
 
@@ -112,6 +113,7 @@ func Pid1(_ []string) error {
 	makeRShared("/")
 	setHostname()
 	logDevices()
+	logPlatform()
 	bootStep("mount", "ok")
 
 	// The splash comes first: it owns the screen until the console is ready, so
@@ -388,11 +390,13 @@ func startAPI() {
 // cluster). The daemon is a supervised child, so the SIGTERM a clean shutdown
 // sends to every child reaches it.
 func startGuestAgent() {
-	// /proc/xen exists only in a Xen guest: CONFIG_XEN_COMPAT_XENFS creates it
-	// when the kernel has detected the hypervisor. Off Xen -- the libvirt test
-	// cluster -- there is nothing to publish, and starting a daemon that would
-	// exit at once is only noise.
-	if _, err := os.Stat("/proc/xen"); err != nil {
+	// Best effort, and a no-op off Xen: the agent writes to XenStore, which only
+	// exists in a Xen guest, and it would exit at once elsewhere (the libvirt test
+	// cluster). Platform() keys on /proc/xen -- the kernel's own detection of Xen
+	// -- so this is the same gate as before, but named and shared with the rest
+	// of the platform policy. The daemon is a supervised child, so the SIGTERM a
+	// clean shutdown sends to every child reaches it.
+	if hostinfo.Detect() != hostinfo.PlatformXen {
 		return
 	}
 	if _, err := os.Stat(pid1XenGuestAgent); err != nil {
@@ -494,6 +498,13 @@ func logDevices() {
 			kmsg("device absent: %s (%v)", p, err)
 		}
 	}
+}
+
+// logPlatform records the hypervisor the node detected, in the kernel log. It is
+// the first thing to look at when a node misbehaves on one hypervisor but not
+// another -- and it is what startGuestAgent and the console's serial face key on.
+func logPlatform() {
+	kmsg("platform: %s", hostinfo.Detect().Name())
 }
 
 // bootLines is the walk through bring-up, and bootSplash the splash child that
