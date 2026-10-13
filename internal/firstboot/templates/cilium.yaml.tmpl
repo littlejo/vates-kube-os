@@ -18,6 +18,10 @@
 #                               tc BPF path the kernel is built for, rather
 #                               than the newer tcx one.
 #
+#   - the agent drops SYS_MODULE and SYSLOG from the chart's capabilities:
+#                               nothing here loads a kernel module or reads
+#                               the kernel log.
+#
 # Adapted to this image, in two places:
 #
 #   - the agent's runtime state (the chart's /var/run/cilium and
@@ -35,10 +39,13 @@
 #   - the operator runs with one replica. The chart ships two with a
 #     required pod anti-affinity, which would leave the second pod Pending
 #     on a single-node cluster. With one replica the rolling update goes to
-#     maxUnavailable: 100% (the chart's own setting for this case): at
-#     50% the update would need a surge pod first, and the same anti-affinity
-#     that justifies the single replica would refuse to schedule it, so the
-#     rollout hangs.
+#     maxUnavailable: 100% (the chart's own setting for this case) and
+#     maxSurge: 0: a surge pod is one the same anti-affinity that justifies
+#     the single replica would refuse to schedule, so the rollout would hang.
+#
+# Everything below the header is generated: scripts/render-cilium.sh renders
+# the chart with these settings as chart values and replaces the body. Edit
+# the script, not the manifest, and re-run it for a Cilium bump.
 #
 # The manifest is embedded rather than fetched at boot, exactly like the
 # flannel one: it is a versioned artifact of the OS image, and a control
@@ -1375,11 +1382,8 @@ metadata:
     app.kubernetes.io/part-of: cilium
     app.kubernetes.io/name: cilium-operator
 spec:
-  # One replica. The chart ships two with a required pod anti-affinity, which on
-  # a single-node cluster (the first machine a provider creates) would leave the
-  # second pod Pending forever. One operator performs the same reconciliations
-  # -- identity and endpoint GC, the node taints, the LB IPAM -- and a lost pod
-  # is rescheduled by the Deployment.
+  # See docs on ServerCapabilities.LeasesResourceLock in file pkg/k8s/version/version.go
+  # for more details.
   replicas: 1
   selector:
     matchLabels:

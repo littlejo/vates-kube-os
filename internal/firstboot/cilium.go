@@ -15,8 +15,9 @@ const CiliumManifestPath = "/etc/kubernetes/cni/cilium.yaml"
 // Naming them is what gives the registry rewrite something to rewrite: a mirror
 // in vates-node.yaml is expressed as "quay.io goes to harbor/mirror/quay.io",
 // and a reference spelled out inside a template could not be matched against it.
-// The pin is the tag and the digest the chart itself pins (v1.20.1); both are
-// carried so a mirror cannot silently serve a different build of the tag.
+// The pin is the tag and the digest the chart itself pins (v1.20.1, printed by
+// scripts/render-cilium.sh); both are carried so a mirror cannot silently serve
+// a different build of the tag.
 const (
 	CiliumAgentImage    = "quay.io/cilium/cilium:v1.20.1@sha256:ae9ea21f7427fe24bc6ea7247eb552157a1b0a431744045d3f641545ca71d11b"
 	CiliumOperatorImage = "quay.io/cilium/operator-generic:v1.20.1@sha256:6c3885fc7b629099fdbe2a5c87869c86feb825fa18fae299eac0f61918d16ecf"
@@ -25,7 +26,7 @@ const (
 // CiliumManifest renders the Cilium agent DaemonSet, the operator and their
 // RBAC.
 //
-// The manifest is the Cilium v1.20.1 chart, embedded in the binary rather than
+// The manifest is the Cilium v1.20.1 chart (scripts/render-cilium.sh), embedded in the binary rather than
 // fetched when a node first comes up: it is an artifact of the OS image, and a
 // control plane has to be able to start with no outbound access. It is rendered
 // with the settings a node needs, stated at the top of the template: the pod
