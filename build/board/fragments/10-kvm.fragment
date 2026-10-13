@@ -7,7 +7,7 @@
 # Storage. libvirt and virt-manager present the disk as virtio (the default) or
 # as emulated SATA (covered by 00-common). virtio-scsi for SCSI-backed virtio.
 CONFIG_VIRTIO_BLK=y
-CONFIG_VIRTIO_SCSI=y
+CONFIG_SCSI_VIRTIO=y
 #
 # Networking. virtio-net is the default NIC in virt-manager; the emulated e1000
 # fallback is in 00-common.
