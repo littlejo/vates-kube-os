@@ -245,10 +245,10 @@ write_drive() {
 "
   fi
 
-  # The CNI the node installs itself, stated in its document. Both are
-  # applied by the node at bootstrap -- see internal/firstboot -- and both
-  # run alongside kube-proxy, so nothing else in the document changes.
-  local cni_plugin="${CNI}"
+  # The CNI the node installs itself, stated in its document (cni.plugin
+  # below). Both are applied by the node at bootstrap -- see
+  # internal/firstboot -- and both run alongside kube-proxy, so nothing else
+  # in the document changes.
 
   local doc
   doc="$(cat <<EOF
@@ -261,7 +261,7 @@ ${extra}${vip_block}network:
   iface: eth0
   mode: dhcp
 cni:
-  plugin: ${cni_plugin}
+  plugin: ${CNI}
   cidr: "10.244.0.0/16"
 dashboard:
   mode: ${DASHBOARD}

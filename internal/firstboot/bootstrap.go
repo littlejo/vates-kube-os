@@ -101,8 +101,13 @@ func cniManifest(cfg *vatescfg.Config) (path string, manifest []byte, err error)
 	case vatescfg.CNICilium:
 		manifest, err = CiliumManifest(cfg)
 		return CiliumManifestPath, manifest, err
-	default: // CNINone
+	case vatescfg.CNINone:
 		return "", nil, nil
+	default:
+		// Validate refuses anything else and defaults the empty value, so this
+		// is a Config that was never validated. Installing nothing would leave
+		// the node NotReady with no word as to why.
+		return "", nil, fmt.Errorf("cni.plugin %q is not one the node installs", cfg.CNI.Plugin)
 	}
 }
 

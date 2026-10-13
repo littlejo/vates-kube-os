@@ -920,6 +920,19 @@ func TestBootstrapFailureToApplyTheCNIIsReported(t *testing.T) {
 	}
 }
 
+// A plugin Validate would have refused (or left empty, which it defaults) is a
+// Config that skipped validation. It must fail out loud rather than be taken
+// for none, which would install nothing and leave the node NotReady.
+func TestCNIManifestRefusesAnUnvalidatedPlugin(t *testing.T) {
+	for _, plugin := range []string{"", "calico"} {
+		cfg := loadConfig(t, masterDoc)
+		cfg.CNI.Plugin = plugin
+		if path, _, err := cniManifest(cfg); err == nil {
+			t.Errorf("cniManifest(%q) = %q, nil; want an error", plugin, path)
+		}
+	}
+}
+
 // The two CNIs are the same field, cni.cidr, told to two different readers:
 // flannel is given the range in its manifest, cilium reads it from the node's
 // podCIDR annotation, which kubeadm writes from the same field. This is what
