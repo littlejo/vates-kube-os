@@ -170,8 +170,8 @@ func JoinConfiguration(cfg *vatescfg.Config, nodeName, nodeIP string) ([]byte, e
 //     to a voting member.
 //   - A learner catches up only once this machine's etcd is RUNNING, and etcd
 //     runs as a static pod started by the kubelet.
-//   - The kubelet is started by k8s-node.target, after vates-init's configure
-//     step returns.
+//   - The kubelet is started by PID 1, after vates-init's configure step
+//     returns.
 //
 // Run from configuration, the promotion waits for a learner that cannot start,
 // and retries with
@@ -181,35 +181,27 @@ func JoinConfiguration(cfg *vatescfg.Config, nodeName, nodeIP string) ([]byte, e
 // Run from bootstrap, the kubelet is already up, so the manifests kubeadm writes
 // are picked up at once, etcd starts, catches up, and is promoted.
 //
-// kubelet-start is still skipped: it writes a kubelet environment file and starts
-// kubelet.service, and this system runs the kubelet in a container under its own
-// unit. Skipping it is safe HERE, unlike in the earlier attempt to run the join
-// before the kubelet -- there is already a kubelet.
-func JoinControlPlaneCommand(image string) []string {
-	// The binary cache and the version travel with the command: the image is
-	// generic and the kubeadm it runs is fetched at run time, like the kubelet's.
-	args := kubeadmContainers()
-	args = append(args, binarySourceArgs()...)
-	return append(args,
-		image,
-		ctrContainerID("kubeadm-join"),
-		"/usr/local/bin/kubeadm", "join",
+// kubelet-start is skipped: it writes a kubelet environment file and starts the
+// kubelet, and this system starts its own kubelet as a host process. Skipping it
+// is safe HERE, unlike in the earlier attempt to run the join before the kubelet
+// -- there is already a kubelet.
+func JoinControlPlaneCommand() []string {
+	return []string{
+		KubeadmPath, "join",
 		"--config", JoinConfigPath,
 		// kubelet-start and kubelet-wait-bootstrap are both skipped, for the same
 		// reason. kubelet-start writes the kubelet settings and (re)starts the
-		// kubelet -- this system runs its own kubelet in a container, already up
-		// by the time the join runs. kubelet-wait-bootstrap then waits for that
-		// kubelet to have bootstrapped itself, which it already has; on
-		// Kubernetes 1.37 it became a TOP-LEVEL phase (it used to be a sub-phase
-		// of kubelet-start), so skipping kubelet-start no longer skipped it, the
-		// wait timed out, and the join failed AFTER writing the control-plane
-		// manifests -- leaving a control plane that ran but was never marked.
+		// kubelet -- this system starts its own kubelet, already up by the time
+		// the join runs. kubelet-wait-bootstrap then waits for that kubelet to
+		// have bootstrapped itself, which it already has; on Kubernetes 1.37 it
+		// became a TOP-LEVEL phase (it used to be a sub-phase of kubelet-start),
+		// so skipping kubelet-start no longer skipped it, the wait timed out, and
+		// the join failed AFTER writing the control-plane manifests -- leaving a
+		// control plane that ran but was never marked.
 		"--skip-phases=kubelet-start,kubelet-wait-bootstrap",
-		// Five preflight checks are inapplicable here, for two reasons.
-		//
-		// The kubelet is already running by the time the join happens, and it
-		// obtained its own credentials, where kubeadm expects to write and start
-		// them itself:
+		// The preflight checks below assume a full host whose kubelet kubeadm
+		// started. Here the kubelet is already running and obtained its own
+		// credentials, and this image is minimal:
 		//
 		//   FileAvailable--etc-kubernetes-kubelet.conf
 		//     already there: the kubelet wrote it, through TLS bootstrap
@@ -219,35 +211,19 @@ func JoinControlPlaneCommand(image string) []string {
 		//   Port-10250
 		//     "Port 10250 is in use", because it is: by this node's own kubelet
 		//
-		// And the kubelet container is a FROM-scratch image carrying only what
-		// the kubelet itself shells out to, so two programs kubeadm looks for
-		// are absent on purpose:
-		//
-		//   FileExisting-conntrack
-		//     the kubelet does not run kube-proxy -- that is its own image. What
-		//     the check asks about is nf_conntrack, and it is built into the
-		//     kernel here.
-		//   FileExisting-nsenter
-		//     kubeadm uses it in the kubelet-start phase, which this join skips
-		//     (`--skip-phases=kubelet-start`).
-		//
-		// Kubernetes 1.37 adds three more checks that assume a full host, and
-		// which are just as inapplicable to this containerised join:
-		//
+		//   FileExisting-conntrack, FileExisting-nsenter,
 		//   FileExisting-losetup, FileExisting-cp
-		//     losetup (util-linux) and cp (coreutils) are absent on purpose: the
-		//     kubelet container is FROM scratch and carries only what the kubelet
-		//     shells out to. kubeadm 1.37 merely checks that they exist.
+		//     programs kubeadm looks for that this minimal image does not
+		//     necessarily carry; nsenter is absent on purpose (util-linux is
+		//     built without it). A check that would pass being ignored is
+		//     harmless.
 		//   SystemVerification
-		//     its cgroup check wants a cgroupfs mount point in /proc/mounts,
-		//     which a container does not have; the kernel-module checks it also
-		//     covers are known-good for this image's kernel. Without this the
-		//     join fails at preflight on 1.37 and a joining control plane never
-		//     becomes one (it stays Ready, with no control-plane role).
+		//     added in Kubernetes 1.37; the kernel-module checks it also covers
+		//     are known-good for this image's kernel.
 		//
 		// These and nothing else: any other preflight failure is still a failure.
 		"--ignore-preflight-errors=FileAvailable--etc-kubernetes-kubelet.conf,FileAvailable--etc-kubernetes-bootstrap-kubelet.conf,Port-10250,FileExisting-conntrack,FileExisting-nsenter,FileExisting-losetup,FileExisting-cp,SystemVerification",
-	)
+	}
 }
 
 // MarkControlPlaneCommand is the command that applies the control-plane role to
@@ -273,16 +249,9 @@ func JoinControlPlaneCommand(image string) []string {
 // The phase is the JOIN one, not the init one: the document on disk is a
 // JoinConfiguration, and the join phase reads exactly it. It is idempotent, so
 // re-applying what the join already applied costs nothing.
-func MarkControlPlaneCommand(image string) []string {
-	// The binary cache and the version travel with the command, exactly as they
-	// do for the join: the image is generic and the kubeadm it runs is fetched
-	// at run time.
-	args := kubeadmContainers()
-	args = append(args, binarySourceArgs()...)
-	return append(args,
-		image,
-		ctrContainerID("kubeadm-mark-control-plane"),
-		"/usr/local/bin/kubeadm", "join", "phase", "control-plane-join", "mark-control-plane",
+func MarkControlPlaneCommand() []string {
+	return []string{
+		KubeadmPath, "join", "phase", "control-plane-join", "mark-control-plane",
 		"--config", JoinConfigPath,
-	)
+	}
 }

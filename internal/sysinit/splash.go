@@ -1,9 +1,9 @@
 // Splash is the boot screen: the Vates planet and wordmark, a progress bar and a
-// scrolling log of the bring-up, drawn straight onto the screen with cairo and
-// libdrm.
+// scrolling log of the bring-up, drawn straight onto the screen with fogleman/gg
+// and libdrm.
 //
 // It is Plymouth's job done by the one binary the system already carries, with
-// the cairo, pango and libdrm that are already in the image for the dashboard.
+// the gg, freetype and libdrm that are already in the image for the dashboard.
 // Nothing new is added, and Plymouth -- which drags dracut, procps and cpio
 // behind it -- is not needed.
 //
@@ -25,8 +25,8 @@ import (
 	"time"
 
 	"github.com/vatesfr/vates-kube-os/internal/console/tty"
-	"github.com/vatesfr/vates-kube-os/internal/display/gui/cairo"
 	"github.com/vatesfr/vates-kube-os/internal/display/gui/drm"
+	"github.com/vatesfr/vates-kube-os/internal/display/gui/render"
 )
 
 // BootStatusFile is where PID 1 records the bring-up and the splash reads it.
@@ -77,11 +77,10 @@ type splashPhase struct {
 // the bar is full exactly when the last phase is done.
 var splashPhases = []splashPhase{
 	{"mount", "mounting the filesystems", 0.05},
-	{"containerd", "starting the container runtime", 0.10},
-	{"network", "bringing up the network", 0.10},
-	{"images", "importing the kubelet image", 0.20},
-	{"configure", "configuring the node", 0.30},
-	{"kubelet", "starting the kubelet", 0.25},
+	{"containerd", "starting the container runtime", 0.15},
+	{"network", "bringing up the network", 0.15},
+	{"configure", "configuring the node", 0.35},
+	{"kubelet", "starting the kubelet", 0.30},
 }
 
 // The planet PNG has transparent margins around the artwork (it is 2600 square
@@ -108,42 +107,27 @@ func Splash(argv []string) error {
 	tty.HideTextConsole()
 
 	w, h := display.Width(), display.Height()
-	surface := cairo.SurfaceOn(display.Memory(), w, h, display.Stride())
+	surface := render.SurfaceOn(display.Memory(), w, h, display.Stride())
 	if !surface.Valid() {
 		return nil
 	}
 	defer surface.Destroy()
-	ctx := cairo.New(surface)
+	ctx := render.New(surface)
 	defer ctx.Free()
 
-	s := &splashScreen{
-		display: display,
-		surface: surface,
-		ctx:     ctx,
-		w:       w,
-		h:       h,
-		waitFor: map[string]time.Time{},
-	}
-	if path := splashFind(splashWordmark); path != "" {
-		s.wordmark = cairo.PNG(path)
-	}
+	s := newSplashScreen(surface, ctx, w, h)
+	// The offscreen preview builds the same screen without a device; the live
+	// splash hands it the display it presents through.
+	s.display = display
 	defer s.wordmark.Destroy()
-	if path := splashFind(splashPlanet); path != "" {
-		s.planet = cairo.PNG(path)
-	}
 	defer s.planet.Destroy()
-	// The title is the brand's logotype face, the same one the dashboard's
-	// all-caps labels use. "Poppins Vates" carries only A-Z and a space, so the
-	// title is upper-case on purpose: lower-case would fall back mid-word.
-	s.title = cairo.NewFont("Poppins Vates 16")
 	defer s.title.Free()
-	s.note = cairo.NewFont("Poppins 11")
 	defer s.note.Free()
-	s.step = cairo.NewFont("DejaVu Sans Mono 11")
 	defer s.step.Free()
 
 	s.refresh()
 	s.draw()
+	s.present()
 	s.shown = 0
 
 	// A stop request means the console is ready: finish the bar, then let the
@@ -163,6 +147,7 @@ func Splash(argv []string) error {
 	for time.Now().Before(deadline) {
 		if s.refresh() {
 			s.draw()
+			s.present()
 		}
 		// A stop request (or the final `done`) means the console is taking over.
 		select {
@@ -211,6 +196,32 @@ func Splash(argv []string) error {
 	return nil
 }
 
+// newSplashScreen builds the drawing state: the artwork and the faces, resolved
+// once. Both the live splash and the offscreen preview use it, so what a preview
+// writes is what the boot paints.
+func newSplashScreen(surface render.Surface, ctx *render.Context, w, h int) *splashScreen {
+	s := &splashScreen{
+		surface: surface,
+		ctx:     ctx,
+		w:       w,
+		h:       h,
+		waitFor: map[string]time.Time{},
+	}
+	if path := splashFind(splashWordmark); path != "" {
+		s.wordmark = render.PNG(path)
+	}
+	if path := splashFind(splashPlanet); path != "" {
+		s.planet = render.PNG(path)
+	}
+	// The title is the brand's logotype face, the same one the dashboard's
+	// all-caps labels use. "Poppins Vates" carries only A-Z and a space, so the
+	// title is upper-case on purpose: lower-case would fall back mid-word.
+	s.title = render.LoadFirstFont(16, splashFonts("poppins-vates/poppins_vates-webfont.ttf", "truetype/poppins/poppins_vates-webfont.ttf", "poppins/Poppins-Regular.ttf", "truetype/poppins/Poppins-Regular.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf")...)
+	s.note = render.LoadFirstFont(11, splashFonts("poppins/Poppins-Regular.ttf", "truetype/poppins/Poppins-Regular.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf")...)
+	s.step = render.LoadFirstFont(11, splashFonts("dejavu/DejaVuSansMono.ttf", "truetype/dejavu/DejaVuSansMono.ttf", "dejavu/DejaVuSans.ttf", "truetype/dejavu/DejaVuSans.ttf")...)
+	return s
+}
+
 // splashDevice reads the optional -device flag, defaulting to the first DRM
 // card -- the one the firmware leaves the screen on.
 func splashDevice(argv []string) string {
@@ -223,17 +234,17 @@ func splashDevice(argv []string) string {
 	return device
 }
 
-// splashScreen is the drawing state: the screen, the surface it hands to cairo,
+// splashScreen is the drawing state: the screen, the surface it hands to gg,
 // the faces resolved once, and where the bar and log landed last frame.
 type splashScreen struct {
 	display  *drm.Display
-	surface  cairo.Surface
-	ctx      *cairo.Context
-	planet   cairo.Surface
-	wordmark cairo.Surface
-	title    cairo.Font
-	note     cairo.Font
-	step     cairo.Font
+	surface  render.Surface
+	ctx      *render.Context
+	planet   render.Surface
+	wordmark render.Surface
+	title    render.Font
+	note     render.Font
+	step     render.Font
 	w, h     int
 
 	steps   []splashStep
@@ -425,9 +436,12 @@ func (s *splashScreen) draw() {
 	if logH > 0 {
 		s.drawLog(entries[len(entries)-n:], x, contentW, y+sep)
 	}
+}
 
-	s.ctx.Flush(s.surface)
-	s.ctx.MarkDirty(s.surface)
+// present writes the whole frame to the screen. The splash draws into its own
+// image, so this is where the pixels reach the mapped buffer.
+func (s *splashScreen) present() {
+	s.surface.Flush()
 	s.display.Present()
 }
 
@@ -488,8 +502,7 @@ func (s *splashScreen) presentBar() {
 	if y < 0 {
 		y = 0
 	}
-	s.ctx.Flush(s.surface)
-	s.ctx.MarkDirty(s.surface)
+	s.surface.FlushRect(x, y, int(s.barW)+4, int(s.barH)+4)
 	s.display.PresentRect(x, y, int(s.barW)+4, int(s.barH)+4)
 }
 
@@ -516,6 +529,19 @@ func splashFind(name string) string {
 	return ""
 }
 
+// splashFonts resolves relative font names to the paths that exist, trying each
+// name in turn, so that a missing brand face falls back to DejaVu. It uses the
+// same lookup as the dashboard, including the VATES_FONT_DIR override.
+func splashFonts(names ...string) []string {
+	var out []string
+	for _, name := range names {
+		if p := render.FindFont(name); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // clampf bounds v to [lo, hi].
 func clampf(v, lo, hi float64) float64 {
 	if v < lo {
@@ -527,7 +553,7 @@ func clampf(v, lo, hi float64) float64 {
 	return v
 }
 
-// hexRGB splits a 0xRRGGBB colour into cairo's 0..1 components.
+// hexRGB splits a 0xRRGGBB colour into gg's 0..1 components.
 func hexRGB(c uint32) (float64, float64, float64) {
 	return float64((c>>16)&0xff) / 255, float64((c>>8)&0xff) / 255, float64(c&0xff) / 255
 }

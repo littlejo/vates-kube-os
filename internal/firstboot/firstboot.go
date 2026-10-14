@@ -2,14 +2,12 @@ package firstboot
 
 import (
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/vatesfr/vates-kube-os/internal/configdrive"
@@ -129,34 +127,27 @@ func waitForIP(get func() (string, error), iface string, timeout time.Duration, 
 	}
 }
 
-// KubeletRootDir is mounted into the kubelet container and is where the kubelet
-// keeps its state. The runtime refuses a bind mount whose source does not exist
-// ("statfs /var/lib/kubelet: no such file or directory"), and nothing else
-// creates it.
+// KubeletRootDir is where the kubelet keeps its state. Nothing else creates it,
+// and the kubelet refuses to start without it.
 const KubeletRootDir = "/var/lib/kubelet"
 
 // KubeletDropIn is where the per-node environment for the kubelet unit is
 // written.
 const KubeletDropIn = "/etc/systemd/system/k8s-kubelet.service.d/10-node.conf"
 
-// KubeletDropInFile renders the systemd drop-in that gives the kubelet unit its
-// per-node values.
+// KubeletDropInFile renders the drop-in that gives the kubelet its per-node
+// values.
 //
-// The unit's ExecStart is a ctr command. The four values below are what the
-// command line and the container's environment need, and systemd expands the
-// ${...} references in ExecStart from here before ctr is invoked:
+// There is no systemd here: PID 1 reads this file itself (see internal/sysinit)
+// and turns the values into the kubelet's command line and environment. Keeping
+// it a systemd-style drop-in is what lets the unit be static and identical on
+// every machine, with only the machine's values arriving from the config drive:
 //
 //	NODE_NAME, NODE_IP           --hostname-override, --node-ip on the kubelet
-//	KUBERNETES_VERSION           passed to the container with --env
-//	KUBERNETES_BINARY_BASE       likewise
+//	KUBERNETES_VERSION           the version the launcher fetches
+//	KUBERNETES_BINARY_BASE       where it fetches it from
 //	KUBELET_BOOTSTRAP_KUBECONFIG the kubelet's --bootstrap-kubeconfig
 //	CLOUD_PROVIDER               the kubelet's --cloud-provider, when set
-//
-// A drop-in, rather than an EnvironmentFile=, because it is part of the unit's
-// own configuration: systemd re-reads it on daemon-reload, which vates-init runs
-// after writing it. Without that reload systemd keeps the unit as it saw it at
-// boot -- with no NODE_NAME or NODE_IP -- and the kubelet fails on an unset
-// variable.
 //
 // bootstrapKubeconfig is EMPTY on the node that creates the cluster, and a path
 // on a node that joins. The first control plane has no token until its own
@@ -173,14 +164,9 @@ func KubeletDropInFile(nodeName, nodeIP, k8sVersion, binaryBase, bootstrapKubeco
 		cloud = "Environment=CLOUD_PROVIDER=" + cloudProvider + "\n"
 	}
 	return fmt.Appendf(nil, `[Service]
-# Written by vates-init.
-#
-# NODE_NAME and NODE_IP are read by the kubelet unit's ExecStart, which
-# references ${NODE_NAME} and ${NODE_IP}.
-#
-# KUBERNETES_VERSION and KUBERNETES_BINARY_BASE reach the CONTAINER's
-# environment, passed by the same ExecStart with --env NAME=${NAME}, expanded
-# from here by systemd.
+# Written by vates-init and read by PID 1, the only thing that parses it (there
+# is no systemd). Each Environment line becomes a flag or an environment
+# variable of the kubelet process.
 Environment=NODE_NAME=%s
 Environment=NODE_IP=%s
 Environment=KUBERNETES_VERSION=%s
@@ -251,115 +237,17 @@ func kubeletConfiguration(criEndpoint, clusterDNS, dnsDomain string) ([]byte, er
 // the host had systemd.
 func cgroupDriver() string { return "cgroupfs" }
 
-// CRIEndpoint is where containerd serves the CRI on the host. The kubelet runs
-// in a container with /run/containerd bind-mounted, so the path is the same
-// inside and outside.
+// CRIEndpoint is where containerd serves the CRI. The kubelet talks to it as a
+// host process, so this is the host path.
 const CRIEndpoint = "unix:///run/containerd/containerd.sock"
 
 // Names repeated across this package's command builders. Naming them once keeps
 // a typo in one builder from disagreeing with the others: the pki paths must
-// match both the provider's drive and kubeadm's expectations, and the ctr flags
-// must be the same on every container this program starts.
+// match both the provider's drive and kubeadm's expectations.
 const (
 	pkiCACert = "pki/ca.crt"
 	pkiCAKey  = "pki/ca.key"
-
-	// The runtime is containerd, driven by its own ctr client, and every
-	// container this program runs lives in a namespace of its own. Not
-	// "k8s.io": that one belongs to the CRI, which the kubelet uses to run
-	// PODS, and mixing the node's own plumbing into it would put this system's
-	// containers among the workloads.
-	ctrBin       = "ctr"
-	ctrNamespace = "vates"
 )
-
-// ctrBase is the prefix of every container this program starts: run it, remove
-// it when it exits, on the host network.
-//
-// --rm matters more than it looks: ctr leaves a stopped container behind
-// otherwise, and `--rm` is what lets the same id -- one per run, see
-// ctrContainerID -- be reused without a cleanup step this program would have to
-// remember to do.
-func ctrBase(privileged bool) []string {
-	args := []string{ctrBin, "-n", ctrNamespace, "run", "--rm", "--net-host"}
-	if privileged {
-		args = append(args, "--privileged")
-	}
-	return args
-}
-
-// ctrContainerID names one run's container.
-//
-// Unique per RUN, and across REBOOTS. Two collisions had to be removed, and
-// both leave a snapshot behind that blocks every later run with
-//
-//		ctr: snapshot "vates-kubeadm-<id>": already exists
-//
-//	  - within a process: the management API answers GetJoinMaterial from one
-//	    long-lived process and may answer several calls at once, so a per-process
-//	    id would collide on concurrent calls. A monotonic counter fixes that.
-//	  - across reboots: the counter restarts with the process, and PID 1 is 1
-//	    again after a reboot, so the same id came back. If a run had been
-//	    interrupted -- a power cut during the first join, exactly the case a node
-//	    must survive -- its snapshot was still there, the retried join could never
-//	    start, and the control plane never joined. Measured: a joining control
-//	    plane stuck with `ctr: snapshot "vates-kubeadm-join-1-1": already exists`
-//	    on every boot after its first join was cut short.
-//
-// The random suffix makes the id unused by construction. The id is read by
-// nothing; it only has to be valid and unused when ctr creates it.
-var ctrRunCounter atomic.Uint64
-
-func ctrContainerID(prefix string) string {
-	return fmt.Sprintf("vates-%s-%d-%d-%08x", prefix, os.Getpid(), ctrRunCounter.Add(1), rand.Uint32())
-}
-
-// ctrMount renders one bind mount in ctr's --mount syntax.
-//
-// podman took `-v src:dst[:ro]`; ctr takes an OCI mount spec. A read-only mount
-// is `rbind:ro`, and the recursive bind is kept for every one of them: a bind of
-// a directory that is itself a mount point is otherwise not followed.
-func ctrMount(src, dst string, ro bool) string {
-	opts := "rbind"
-	if ro {
-		opts = "rbind:ro"
-	}
-	return "type=bind,src=" + src + ",dst=" + dst + ",options=" + opts
-}
-
-// withMounts appends a --mount flag for each spec, so the flag is written once
-// rather than beside every path.
-func withMounts(args []string, mounts ...string) []string {
-	for _, m := range mounts {
-		args = append(args, "--mount", m)
-	}
-	return args
-}
-
-// kubeadmContainers is the argument prefix shared by every kubeadm container:
-// privileged, on the host network, then the paths kubeadm inspects -- the
-// cluster's configuration, etcd's data, the kernel modules and boot
-// configuration (so a check sees the machine and not the image), and the CRI
-// socket. The all-in-one join and the single phases must see the same machine,
-// so they share this.
-func kubeadmContainers() []string {
-	mounts := []string{
-		ctrMount("/etc/kubernetes", "/etc/kubernetes", false),
-		ctrMount(EtcdDataDir, EtcdDataDir, false),
-	}
-	// /lib/modules and /boot are inspected, not required. On a machine without
-	// them -- the image keeps no module tree and boots from the ESP,
-	// so neither directory exists -- a bind mount of a missing source fails the
-	// whole container ("open /boot: no such file or directory") and the kubeadm
-	// phase never runs. They are mounted only when they are there.
-	for _, p := range []string{"/lib/modules", "/boot"} {
-		if _, err := os.Stat(p); err == nil {
-			mounts = append(mounts, ctrMount(p, p, true))
-		}
-	}
-	mounts = append(mounts, ctrMount("/run/containerd", "/run/containerd", false))
-	return withMounts(ctrBase(true), mounts...)
-}
 
 // Files computes every file the node needs, without writing anything.
 //
@@ -658,22 +546,13 @@ type Runner interface {
 	Progress(text string)
 }
 
-// KubeletImageRef is the image the kubelet unit runs, and that the build imports
-// into containerd under this name.
-//
-// One stable tag for every Kubernetes version: the image holds a launcher, and
-// which version it runs is answered by vates-node.yaml alone -- so the unit never
-// has to be rewritten and the image is never re-tagged.
-const KubeletImageRef = "localhost/vates/kubelet:current"
-
 // BinariesDir is where the launcher caches fetched Kubernetes binaries.
 //
 // On the host, under /var: the image is fixed and identical everywhere, and what
-// it RUNS is decided per machine. Shared with the containers vates-init starts so
-// that a version is fetched once for the kubelet, kubeadm and kubectl alike.
+// it RUNS is decided per machine. The kubelet, kubeadm and kubectl all go through
+// the launcher, so a version is fetched once for all of them.
 //
-// It is a mount source for the kubelet unit, so it has to exist and be labelled
-// for containers before anything starts.
+// It has to exist and be labelled for the pod containers that read it.
 const BinariesDir = "/var/lib/vates/kubernetes"
 
 // BootstrappedMarker is written once a bootstrapping control plane has run its
@@ -708,42 +587,19 @@ func bootstrapDone(r Runner) bool {
 	return err == nil
 }
 
-// binarySourceArgs let a container find (or fetch) the Kubernetes binaries this
-// node uses: the shared cache, and the version and mirror the launcher reads.
+// Apply writes the files and prepares the node; PID 1 starts the kubelet once
+// this returns.
 //
-// podman could take a variable BY NAME (`-e KUBERNETES_VERSION`); ctr needs the
-// VALUE. So it is resolved here, from this process's environment, which
-// vates-init filled from vates-node.yaml before any command was built -- the
-// same mechanism, one step earlier.
-func binarySourceArgs() []string {
-	return binarySourceArgsFor(os.Getenv("KUBERNETES_VERSION"), os.Getenv("KUBERNETES_BINARY_BASE"))
-}
-
-// binarySourceArgsFor is binarySourceArgs with the version and the mirror given
-// explicitly, for callers that read them from the kubelet drop-in rather than
-// from this process's environment.
-func binarySourceArgsFor(version, binaryBase string) []string {
-	return []string{
-		"--mount", ctrMount(BinariesDir, BinariesDir, false),
-		"--env", "KUBERNETES_VERSION=" + version,
-		"--env", "KUBERNETES_BINARY_BASE=" + binaryBase,
-	}
-}
-
-// Apply writes the files, points the kubelet image alias at the requested
-// version and starts the node.
-//
-// The order matters: everything the kubelet needs is on disk before the unit
-// that reads it is started.
+// The order matters: everything the kubelet needs is on disk before it starts.
 func Apply(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName, nodeIP string, r Runner) error {
 	files, err := Files(cfg, drive, paths, nodeName, nodeIP)
 	if err != nil {
 		return err
 	}
 
-	// Every directory the kubelet unit or a static pod mounts as a hostPath must
-	// exist first: the runtime refuses a bind mount whose source is missing, and
-	// the kubelet refuses to start. Nothing else creates them.
+	// Every directory the kubelet or a static pod writes into must exist first:
+	// a hostPath that is missing is a pod that never starts. Nothing else
+	// creates them.
 	for _, dir := range RequiredDirs(cfg) {
 		if err := r.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("creating %s: %w", dir, err)
@@ -785,25 +641,6 @@ func Apply(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName
 	// directory when it starts, and the API server it launches is reachable at
 	// the VIP, which kube-vip provides. Generating afterwards would mean starting
 	// a kubelet that has nothing to run.
-	// The image that the kubelet runs from, on EVERY node: a worker's kubelet is
-	// the same container as a control plane's. Checked before any work, because a
-	// node without it cannot start either way, and the failure belongs at the top
-	// rather than after its files have been written.
-	// `ctr images check <ref>` is not usable here: its argument is a FILTER, and
-	// a reference contains '/' and ':' that the filter parser rejects ("expected
-	// an operator"). Listing the names and looking for ours is what works.
-	ls := []string{ctrBin, "-n", ctrNamespace, "images", "ls", "-q"}
-	out, err := r.Run(ls[0], ls[1:]...)
-	if err != nil {
-		return fmt.Errorf("listing containerd images: %w", err)
-	}
-	if !strings.Contains(string(out), KubeletImageRef) {
-		return fmt.Errorf("the kubelet image %s is not present on this node "+
-			"(it is baked into the OS image by this project's build, and carries "+
-			"the launcher that fetches the Kubernetes binaries for the version "+
-			"vates-node.yaml asks for)", KubeletImageRef)
-	}
-
 	if cfg.Role == vatescfg.RoleMaster {
 		switch {
 		case JoiningControlPlane(cfg, drive):
@@ -821,7 +658,7 @@ func Apply(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName
 		default:
 			for _, phase := range KubeadmPhases {
 				start := time.Now()
-				args := KubeadmPhaseCommand(KubeletImageRef, phase)
+				args := KubeadmPhaseCommand(phase)
 				if _, err := r.Run(args[0], args[1:]...); err != nil {
 					return fmt.Errorf("kubeadm phase %q: %w", phase, err)
 				}
@@ -835,11 +672,10 @@ func Apply(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName
 		}
 	}
 
-	// Nothing to point at a version: the image is the same for every one, and the
-	// version travels in the environment. The image's presence was checked before
-	// any work was done.
-	r.Logf("kubelet image %s; the launcher will fetch Kubernetes %s",
-		KubeletImageRef, cfg.Kubernetes.Version)
+	// Nothing to point at a version: the image carries a launcher, and the version
+	// travels in the environment. PID 1 starts the kubelet when this returns, and
+	// the launcher fetches Kubernetes on its first run.
+	r.Logf("the launcher will fetch Kubernetes %s", cfg.Kubernetes.Version)
 
 	// Labelling comes after the kubeadm phases, because those are what create
 	// the files under /etc/kubernetes that the containers will read.
@@ -847,10 +683,9 @@ func Apply(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, nodeName
 		return err
 	}
 
-	// Nothing is started from here, deliberately. k8s-node.target is enabled at
-	// boot and Requires= this unit, so systemd brings the kubelet up once this
-	// has succeeded. Calling `systemctl start` on the unit that orders this one
-	// would make the ordering circular.
-	r.Logf("configuration complete; k8s-node.target will start the kubelet")
+	// Nothing is started from here, deliberately: PID 1 starts the kubelet once
+	// Configure returns (see internal/sysinit). Starting it here would race the
+	// process that is already about to.
+	r.Logf("configuration complete; PID 1 will start the kubelet")
 	return nil
 }

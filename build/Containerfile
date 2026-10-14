@@ -15,11 +15,11 @@
 # one COPY + RUN per component so each component caches on its own.
 #
 #   pass -1  libc     : GNU kernel headers + glibc, from source, into /sysroot
-#   pass  2  socle    : zlib, XML, FFI, regex, image/DRM primitives
+#   pass  2  socle    : zlib, DRM, seccomp and netfilter primitives
 #   pass  3  tools    : busybox, util-linux, e2fsprogs, ...
-#   pass  4  console  : freetype -> fontconfig -> glib -> cairo -> harfbuzz -> pango
+#   pass  4  console  : the console's fonts (DejaVu, Poppins); drawing is pure Go
 #   pass  1  kernel   : linux + kernel.fragment
-#   pass  6  assemble : systemd-boot, kubelet image, genimage (the assembler)
+#   pass  6  assemble : systemd-boot, genimage (the assembler)
 #
 # /sysroot is the staging tree: the libc pass seeds it, every recipe installs
 # into it with DESTDIR, and every compile points at it with --sysroot.
@@ -49,16 +49,6 @@ RUN bash /build/lib/build-libc.sh
 FROM libc AS socle
 COPY recipes/socle/libzlib.sh /build/recipes/socle/libzlib.sh
 RUN /build/lib/run-recipe.sh libzlib
-COPY recipes/socle/expat.sh /build/recipes/socle/expat.sh
-RUN /build/lib/run-recipe.sh expat
-COPY recipes/socle/libffi.sh /build/recipes/socle/libffi.sh
-RUN /build/lib/run-recipe.sh libffi
-COPY recipes/socle/pcre2.sh /build/recipes/socle/pcre2.sh
-RUN /build/lib/run-recipe.sh pcre2
-COPY recipes/socle/libpng.sh /build/recipes/socle/libpng.sh
-RUN /build/lib/run-recipe.sh libpng
-COPY recipes/socle/pixman.sh /build/recipes/socle/pixman.sh
-RUN /build/lib/run-recipe.sh pixman
 COPY recipes/socle/libdrm.sh /build/recipes/socle/libdrm.sh
 RUN /build/lib/run-recipe.sh libdrm
 COPY recipes/socle/libseccomp.sh /build/recipes/socle/libseccomp.sh
@@ -67,8 +57,6 @@ COPY recipes/socle/libmnl.sh /build/recipes/socle/libmnl.sh
 RUN /build/lib/run-recipe.sh libmnl
 COPY recipes/socle/popt.sh /build/recipes/socle/popt.sh
 RUN /build/lib/run-recipe.sh popt
-COPY recipes/socle/libfribidi.sh /build/recipes/socle/libfribidi.sh
-RUN /build/lib/run-recipe.sh libfribidi
 
 # --- pass 3: tools ----------------------------------------------------------
 # The system tools and the libraries they bring. mount/umount stay with busybox;
@@ -95,22 +83,10 @@ COPY recipes/tools/busybox.sh /build/recipes/tools/busybox.sh
 RUN /build/lib/run-recipe.sh busybox
 
 # --- pass 4: console --------------------------------------------------------
-# The cairo + DRM console's stack. A chain, not a fan: freetype -> fontconfig ->
-# glib -> cairo -> harfbuzz -> pango. It needs the socle (libpng, pixman) and
-# util-linux's libmount (from the tools pass).
+# The console's fonts. The drawing is pure Go: internal/display/gui/render draws
+# with fogleman/gg and lays out text with the pure-Go freetype, so this pass
+# ships only the TTF faces the dashboard and the splash load by path.
 FROM tools AS console
-COPY recipes/console/freetype.sh /build/recipes/console/freetype.sh
-RUN /build/lib/run-recipe.sh freetype
-COPY recipes/console/fontconfig.sh /build/recipes/console/fontconfig.sh
-RUN /build/lib/run-recipe.sh fontconfig
-COPY recipes/console/libglib2.sh /build/recipes/console/libglib2.sh
-RUN /build/lib/run-recipe.sh libglib2
-COPY recipes/console/cairo.sh /build/recipes/console/cairo.sh
-RUN /build/lib/run-recipe.sh cairo
-COPY recipes/console/harfbuzz.sh /build/recipes/console/harfbuzz.sh
-RUN /build/lib/run-recipe.sh harfbuzz
-COPY recipes/console/pango.sh /build/recipes/console/pango.sh
-RUN /build/lib/run-recipe.sh pango
 COPY recipes/console/dejavu.sh /build/recipes/console/dejavu.sh
 RUN /build/lib/run-recipe.sh dejavu
 # The Vates typeface: the full Poppins family for the text, and the "Poppins
@@ -155,7 +131,6 @@ COPY recipes/vates /build/recipes/vates
 RUN /build/lib/run-recipe.sh vates-sysinit
 RUN /build/lib/run-recipe.sh vates-console
 RUN /build/lib/run-recipe.sh vates-api
-RUN /build/lib/run-recipe.sh vates-kubelet-run
 RUN /build/lib/run-recipe.sh vates-launcher
 
 # --- pass 4b: Xen guest agent (Rust) -----------------------------------------
@@ -180,9 +155,8 @@ COPY dl/xen-guest-agent-6acc719.tar.gz /src/dl/
 RUN /build/lib/run-recipe.sh xen-guest-agent
 
 # --- pass 5: container runtime ----------------------------------------------
-# containerd, runc and the CNI plugins, from upstream release artifacts. Only
-# what Kubernetes needs to run: the kubelet image, built in the disk stage, is
-# imported into containerd at first boot.
+# containerd, runc and the CNI plugins, from upstream release artifacts. What
+# Kubernetes needs to run the pods and the control plane.
 FROM console AS runtime
 # The Mozilla CA bundle, pinned by sha. containerd pulls the Kubernetes images
 # over TLS and the launcher fetches binaries over TLS; without it both fail with
@@ -231,8 +205,6 @@ COPY --from=guest /sysroot/usr/lib/libxentoolcore.so.1* /sysroot/usr/lib/
 COPY --from=guest /sysroot/usr/lib/libxentoollog.so.1* /sysroot/usr/lib/
 # The guest components' license texts (the curated notices ride the overlay).
 COPY --from=guest /sysroot/usr/share/licenses /sysroot/usr/share/licenses
-COPY lib/build-kubelet-image.sh /build/lib/build-kubelet-image.sh
-RUN bash /build/lib/build-kubelet-image.sh
 COPY genimage.cfg /build/genimage.cfg
 COPY context /build/context
 COPY recipes/host/libconfuse.sh /build/recipes/host/libconfuse.sh

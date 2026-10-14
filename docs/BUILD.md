@@ -40,15 +40,15 @@ it and what follows.
 flowchart LR
     base["Fedora<br/>(seed compiler, build host only)"]
     libc["pass -1 · libc<br/>kernel headers + glibc"]
-    socle["pass 2 · socle<br/>zlib expat libffi pcre2 libpng pixman<br/>libdrm libseccomp libmnl popt fribidi"]
+    socle["pass 2 · socle<br/>zlib libdrm libseccomp<br/>libmnl popt"]
     tools["pass 3 · tools<br/>util-linux libnftnl iptables kmod<br/>e2fsprogs gptfdisk iproute2 kbd busybox"]
-    console["pass 4 · console<br/>freetype fontconfig glib cairo harfbuzz pango dejavu"]
+    console["pass 4 · console<br/>fonts (DejaVu, Poppins) — drawing is pure Go"]
     kernel["pass 1 · kernel<br/>linux + fragment"]
     runtime["pass 5 · runtime<br/>CA bundle + containerd runc + CNI"]
     gobase["Go toolchain<br/>(borrowed, from the base)"]
     vates["pass · vates<br/>recipes: the Go binaries"]
     guest["pass · guest<br/>recipes: libxenstore + xen-guest-agent (Rust)"]
-    disk["pass 6 · assemble<br/>skeleton + overlay + kubelet image<br/>+ systemd-boot + genimage"]
+    disk["pass 6 · assemble<br/>skeleton + overlay<br/>+ systemd-boot + genimage"]
 
     base --> libc --> socle --> tools --> console --> runtime --> disk
     libc --> kernel --> disk
@@ -70,11 +70,9 @@ built from the Xen source into `/sysroot`.
 A recipe defines a single `build()` function:
 
 ```sh
-# recipes/socle/expat.sh
+# recipes/socle/libmnl.sh
 build() {
-    autotools_build expat \
-        --with-dev-urandom \
-        --without-docbook --without-examples --without-tests --without-xmlwf
+    autotools_build libmnl
 }
 ```
 
@@ -99,7 +97,7 @@ A recipe may only use what the passes **before** it installed.
 | Piece | Origin |
 |---|---|
 | glibc | **built here**, from the GNU source |
-| kernel, busybox, util-linux, the console stack, containerd's userspace | **built here** (or from upstream release binaries) |
+| kernel, busybox, util-linux, the console fonts, containerd's userspace | **built here** (or from upstream release binaries) |
 | the `vates` binaries (Go) | **built here**, from this repository's own source |
 | the Xen guest agent (Rust) | **built here** from `xen-project/xen-guest-agent`, replacing the Go `xe-guest-utilities` |
 | containerd, runc, the CNI plugins | upstream **release binaries** |
@@ -136,7 +134,7 @@ A single stage, from `build/`:
 ./build.sh kernel
 ```
 
-The first build is long — it compiles glibc, the kernel and the console stack;
+The first build is long — it compiles glibc, the kernel and the console fonts;
 order of magnitude: tens of minutes. Later builds are incremental. The base image
 is Fedora; override with `VATES_SCRATCH_BASE`.
 

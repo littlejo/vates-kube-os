@@ -17,10 +17,10 @@ import (
 
 // Launcher fetches one Kubernetes binary and runs it.
 //
-// It is what the kubelet image contains instead of the kubelet. The image is
-// built once and serves any supported Kubernetes version; the version is chosen
-// when the machine is created, in vates-node.yaml, and reaches this program
-// through the environment:
+// It is what the node runs instead of a packaged kubelet. The image is built
+// once and serves any supported Kubernetes version; the version is chosen when
+// the machine is created, in vates-node.yaml, and reaches this program through
+// the environment:
 //
 //	KUBERNETES_VERSION      v1.31.4
 //	KUBERNETES_BINARY_BASE  https://dl.k8s.io/release   (optional)
@@ -29,7 +29,7 @@ import (
 // It is reached by four names, and they are the four the rest of the system
 // already expects, so nothing else had to learn a new path:
 //
-//	/usr/local/bin/kubelet    <- the unit, and kubeadm's own exec of it
+//	/usr/local/bin/kubelet    <- PID 1, and kubeadm's own exec of it
 //	/usr/local/bin/kubeadm    <- vates-init, for the init and join phases
 //	/usr/local/bin/kubectl    <- vates-init and the cluster scripts
 //	/usr/local/bin/mounter    <- the kubelet execs it to perform mounts

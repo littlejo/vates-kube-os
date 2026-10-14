@@ -36,8 +36,8 @@ var (
 // KubeletEnvironment reads the Kubernetes version and binary mirror vates-init
 // recorded for this node's kubelet.
 //
-// A joining-machine's helper needs them to run kubeadm from the container, and
-// it cannot read the config drive the way vates-init did -- the drive may be
+// A joining-machine's helper needs them to fetch kubeadm through the launcher,
+// and it cannot read the config drive the way vates-init did -- the drive may be
 // gone, and this runs on demand, long after boot. The drop-in is the record.
 func KubeletEnvironment(path string) (version, binaryBase string, err error) {
 	b, err := os.ReadFile(path)
@@ -60,10 +60,15 @@ func KubeletEnvironment(path string) (version, binaryBase string, err error) {
 }
 
 // CollectJoinCredentials obtains fresh join credentials from a bootstrapped
-// control plane. It runs kubeadm and kubectl in the same container the bootstrap
-// phases used, because neither binary is on the host -- that is the point of
-// this OS -- and reads the cluster's CA from the PKI kubeadm wrote.
+// control plane. It runs kubeadm and kubectl through the launcher, because
+// neither binary is in the image -- the launcher fetches the version this node
+// runs -- and reads the cluster's CA from the PKI kubeadm wrote.
+//
+// It runs in the management API, a different process from vates-init, so it puts
+// the version and the mirror into its own environment first: that is what the
+// launcher reads.
 func CollectJoinCredentials(paths Paths, version, binaryBase string, r Runner) (JoinCredentials, error) {
+	setBinarySource(version, binaryBase)
 	caPath := filepath.Join(paths.Kubernetes, "pki", "ca.crt")
 	caHash, err := caCertHash(caPath)
 	if err != nil {
@@ -78,11 +83,11 @@ func CollectJoinCredentials(paths Paths, version, binaryBase string, r Runner) (
 	if err != nil {
 		return JoinCredentials{}, err
 	}
-	token, err := createBootstrapToken(version, binaryBase, r)
+	token, err := createBootstrapToken(r)
 	if err != nil {
 		return JoinCredentials{}, err
 	}
-	if _, err := uploadCertificateKey(version, binaryBase, certKey, r); err != nil {
+	if _, err := uploadCertificateKey(certKey, r); err != nil {
 		return JoinCredentials{}, err
 	}
 	return JoinCredentials{Token: token, CertificateKey: certKey, CACertHash: caHash}, nil
@@ -96,8 +101,8 @@ func CollectJoinCredentials(paths Paths, version, binaryBase string, r Runner) (
 // controller-manager publishes afterwards; handing the token out early makes the
 // node's discovery retry forever with a message that names a token ID and never
 // the fact that it was too early.
-func createBootstrapToken(version, binaryBase string, r Runner) (string, error) {
-	created, err := run(r, kubeadmImageArgs(version, binaryBase, "token", "create", "--ttl", "24h"))
+func createBootstrapToken(r Runner) (string, error) {
+	created, err := run(r, kubeadmArgs("token", "create", "--ttl", "24h"))
 	if err != nil {
 		return "", fmt.Errorf("creating a bootstrap token: %w", err)
 	}
@@ -107,7 +112,7 @@ func createBootstrapToken(version, binaryBase string, r Runner) (string, error) 
 		return "", fmt.Errorf("kubeadm did not return a bootstrap token (got %q)", token)
 	}
 
-	base := kubectlImageArgs(version, binaryBase)
+	base := kubectlJoinArgs()
 	for i := 0; i < tokenSignAttempts; i++ {
 		data, err := run(r, append(base, "-n", "kube-public", "get", "configmap", "cluster-info", "-o", "jsonpath={.data}"))
 		if err == nil && strings.Contains(string(data), "jws-kubeconfig-"+id) {
@@ -125,8 +130,8 @@ func createBootstrapToken(version, binaryBase string, r Runner) (string, error) 
 // the uploaded certificates with the key it is given, so re-running with a new
 // key each time would invalidate every key already handed out. See
 // joinCertificateKey -- the key is stable, so the upload is idempotent.
-func uploadCertificateKey(version, binaryBase, key string, r Runner) (string, error) {
-	if _, err := run(r, kubeadmImageArgs(version, binaryBase, "init", "phase", "upload-certs", "--upload-certs", "--certificate-key", key)); err != nil {
+func uploadCertificateKey(key string, r Runner) (string, error) {
+	if _, err := run(r, kubeadmArgs("init", "phase", "upload-certs", "--upload-certs", "--certificate-key", key)); err != nil {
 		return "", fmt.Errorf("uploading the cluster certificates: %w", err)
 	}
 	return key, nil
@@ -169,24 +174,27 @@ func caCertHash(path string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// kubeadmImageArgs builds a `ctr run` invocation of kubeadm in the kubelet
-// image, with the host's /etc/kubernetes visible so the phases read and write
-// the real PKI. The result is a whole argv, ctr included.
-func kubeadmImageArgs(version, binaryBase string, args ...string) []string {
-	a := kubeadmContainers()
-	a = append(a, binarySourceArgsFor(version, binaryBase)...)
-	a = append(a, KubeletImageRef, ctrContainerID("kubeadm"), "/usr/local/bin/kubeadm")
-	return append(a, args...)
+// setBinarySource puts the Kubernetes version and the binary mirror into this
+// process's environment, where the launcher reads them.
+//
+// vates-init does the same at configure time (exposeBinarySource); the
+// management API is a different process and cannot rely on that, so it sets them
+// from the drop-in when it answers a join-material request.
+func setBinarySource(version, binaryBase string) {
+	_ = os.Setenv("KUBERNETES_VERSION", version)
+	_ = os.Setenv("KUBERNETES_BINARY_BASE", binaryBase)
 }
 
-// kubectlImageArgs is the same, for kubectl, pointed at the cluster's admin
-// kubeconfig -- the file kube-vip also uses while the cluster is bootstrapping.
-func kubectlImageArgs(version, binaryBase string, args ...string) []string {
-	a := kubeadmContainers()
-	a = append(a, binarySourceArgsFor(version, binaryBase)...)
-	a = append(a, KubeletImageRef, ctrContainerID("kubectl"), "/usr/local/bin/kubectl")
-	a = append(a, "--kubeconfig", SuperAdminKubeconfig)
-	return append(a, args...)
+// kubeadmArgs runs the node's kubeadm, through the launcher.
+func kubeadmArgs(args ...string) []string {
+	return append([]string{KubeadmPath}, args...)
+}
+
+// kubectlJoinArgs runs kubectl against the cluster's super-admin kubeconfig --
+// the credential that can create bootstrap tokens and read the cluster-info
+// ConfigMap while the cluster is bootstrapping.
+func kubectlJoinArgs(args ...string) []string {
+	return append([]string{KubectlPath, "--kubeconfig", SuperAdminKubeconfig}, args...)
 }
 
 // run executes a whole argv built above.

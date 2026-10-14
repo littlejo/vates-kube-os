@@ -643,15 +643,11 @@ func TestApplyMasterRunsKubeadmBeforeStartingTheNode(t *testing.T) {
 
 	// Each kubeadm phase must run, in the declared order.
 	var phaseOrder []string
-	imageCheckAt := -1
-	for i, c := range r.commands {
+	for _, c := range r.commands {
 		for _, phase := range KubeadmPhases {
 			if strings.Contains(c, " init phase "+phase+" ") {
 				phaseOrder = append(phaseOrder, phase)
 			}
-		}
-		if strings.Contains(c, "images ls") {
-			imageCheckAt = i
 		}
 		if strings.Contains(c, "systemctl") && !strings.Contains(c, "daemon-reload") {
 			t.Errorf("Apply() ran %q; only daemon-reload is expected", c)
@@ -666,47 +662,13 @@ func TestApplyMasterRunsKubeadmBeforeStartingTheNode(t *testing.T) {
 			break
 		}
 	}
-	if imageCheckAt < 0 {
-		t.Fatal("Apply() never checked that the kubelet image is present")
-	}
-	// And it must happen BEFORE the phases: a node without its image cannot run
-	// kubeadm either, and failing after the work has been done would leave a
-	// half-configured machine behind.
-	for i, c := range r.commands {
-		if strings.Contains(c, " init phase ") && imageCheckAt > i {
-			t.Errorf("Apply() checked for the image only after starting a kubeadm phase")
-			break
-		}
-	}
-}
-
-func TestApplyMasterFailsOnAMissingImage(t *testing.T) {
-	// One image carries kubelet, kubeadm and kubectl -- it holds a launcher, not
-	// the binaries -- so this check is the node's first, and it has to fail before
-	// anything is done. The failure must name the image, because the obvious guess
-	// -- that a Kubernetes binary is missing from the host -- is the wrong one:
-	// there is none on the host on purpose.
-	r := &fakeRunner{noImage: true}
-
-	err := Apply(loadConfig(t, masterDoc), bareDrive(t, masterDoc), testPaths(t), "vates-cp-1", "192.168.122.50", r)
-	if err == nil {
-		t.Fatal("Apply() succeeded with no image present")
-	}
-	if !strings.Contains(err.Error(), "kubelet image") {
-		t.Errorf("error was %q, want it to name the kubelet image", err)
-	}
-	for _, c := range r.commands {
-		if strings.Contains(c, " init phase ") {
-			t.Errorf("a kubeadm phase ran despite the image being absent: %s", c)
-		}
-	}
 }
 
 func TestKubeadmPhaseCommandUsesLocalSubcommandForEtcd(t *testing.T) {
 	// kubeadm init phase etcd accepts only "local"; "etc d all" is not a
 	// command. Getting this wrong costs a failed control plane at boot, so it is
 	// asserted rather than trusted to the phase table being read carefully.
-	cmd := strings.Join(KubeadmPhaseCommand("img", "etcd local"), " ")
+	cmd := strings.Join(KubeadmPhaseCommand("etcd local"), " ")
 	if !strings.Contains(cmd, "init phase etcd local") {
 		t.Errorf("etcd phase command = %q, want 'init phase etcd local'", cmd)
 	}
@@ -715,7 +677,7 @@ func TestKubeadmPhaseCommandUsesLocalSubcommandForEtcd(t *testing.T) {
 	}
 
 	// And the others really do take all.
-	if cmd := strings.Join(KubeadmPhaseCommand("img", "certs all"), " "); !strings.Contains(cmd, "init phase certs all") {
+	if cmd := strings.Join(KubeadmPhaseCommand("certs all"), " "); !strings.Contains(cmd, "init phase certs all") {
 		t.Errorf("certs phase command = %q, want 'init phase certs all'", cmd)
 	}
 }
@@ -777,9 +739,6 @@ type fakeRunner struct {
 	commands []string
 	// failOn makes Run fail for any command whose joined form contains it.
 	failOn string
-	// noImage makes the image-existence listing come back empty, as on a node
-	// whose containerd store lacks the kubelet image.
-	noImage bool
 	// bootstrapped makes Stat report the bootstrap marker as present, as on a
 	// control plane that has already run its kubeadm phases once.
 	bootstrapped bool
@@ -810,14 +769,6 @@ func (f *fakeRunner) Run(name string, args ...string) ([]byte, error) {
 	f.commands = append(f.commands, joined)
 	if f.failOn != "" && strings.Contains(joined, f.failOn) {
 		return nil, os.ErrPermission
-	}
-	// The image-existence check lists containerd's images and looks for ours in
-	// the output; answer as if it is present, so tests exercise the normal path.
-	if strings.Contains(joined, "images ls") {
-		if f.noImage {
-			return nil, nil
-		}
-		return []byte(KubeletImageRef + "\n"), nil
 	}
 	return nil, nil
 }
@@ -861,28 +812,11 @@ func TestMarkControlPlaneRetriesUntilTheLabelSticks(t *testing.T) {
 	defer func() { markRetryDelay = old }()
 
 	r := &markRunner{labelsAfter: 3}
-	if err := markControlPlane(KubeletImageRef, "vates-cp-1", r); err != nil {
+	if err := markControlPlane("vates-cp-1", r); err != nil {
 		t.Fatalf("markControlPlane() error = %v", err)
 	}
 	if r.marks < 3 {
 		t.Errorf("the mark phase ran %d time(s), want it retried until the label stuck", r.marks)
-	}
-}
-
-func TestCtrContainerIDIsUniquePerRun(t *testing.T) {
-	// The management API answers GetJoinMaterial from one long-lived process and
-	// may answer several calls at once; a per-process id would collide. Every
-	// run must get its own id.
-	seen := map[string]bool{}
-	for range 100 {
-		id := ctrContainerID("kubeadm")
-		if !strings.HasPrefix(id, "vates-kubeadm-") {
-			t.Fatalf("id = %q, want the vates-kubeadm- prefix", id)
-		}
-		if seen[id] {
-			t.Fatalf("ctrContainerID returned %q twice: concurrent runs would collide", id)
-		}
-		seen[id] = true
 	}
 }
 
@@ -898,24 +832,10 @@ func TestApplyOrdersFilesBeforeStartingTheNode(t *testing.T) {
 		t.Fatal("Apply() wrote no files")
 	}
 
-	// The image must be checked, and it is checked by the name the unit uses:
-	// if the two ever drift, the node fails at boot with "image ... is not
-	// present", which reads like a missing image rather than a naming mismatch.
-	wantCheck := "ctr -n vates images ls -q"
-	var checked bool
-	for _, c := range r.commands {
-		if c == wantCheck {
-			checked = true
-		}
-	}
-	if !checked {
-		t.Errorf("Apply() never ran %q; commands were %v", wantCheck, r.commands)
-	}
-
-	// Apply must NOT start the node itself: k8s-node.target is enabled at boot
-	// and Requires= vates-init, so starting it from here would make the ordering
-	// circular. daemon-reload is the one systemctl call it does need, because
-	// systemd will not otherwise notice the drop-in it just wrote.
+	// Apply must NOT start the node itself: PID 1 starts the kubelet once
+	// Configure returns, and starting it from here would race that process.
+	// daemon-reload is the one systemctl call it does need, because on a systemd
+	// host that is what makes the drop-in it just wrote visible.
 	for _, c := range r.commands {
 		if strings.Contains(c, "systemctl") && !strings.Contains(c, "daemon-reload") {
 			t.Errorf("Apply() ran %q; only daemon-reload is expected (%v)", c, r.commands)
@@ -984,32 +904,6 @@ func TestBootstrapWritesTheDoneMarker(t *testing.T) {
 		}
 	}
 	t.Errorf("Bootstrap() did not write %s; writes were %v", BootstrapDoneMarker, r.writes)
-}
-
-func TestImageTagMatchesTheBuild(t *testing.T) {
-	// The unit names an image and build/lib/build-kubelet-image.sh builds it. If
-	// the two disagree, every node fails at first boot with "kubelet image ...
-	// is not present", which reads like a missing image rather than like a
-	// naming mismatch. So the convention is checked against the build script
-	// itself rather than restated here.
-	raw, err := os.ReadFile(filepath.Join("..", "..", "build", "lib", "build-kubelet-image.sh"))
-	if err != nil {
-		t.Fatalf("cannot read build/lib/build-kubelet-image.sh: %v", err)
-	}
-	const buildTag = `REF="localhost/vates/kubelet:current"`
-	if !strings.Contains(string(raw), buildTag) {
-		t.Fatalf("build/lib/build-kubelet-image.sh no longer builds the image as %s;\n"+
-			"update KubeletImageRef and this test together", buildTag)
-	}
-
-	// One image for every version, and the name carries no version: the version
-	// is chosen when a machine is created, not when the image is built.
-	if KubeletImageRef != "localhost/vates/kubelet:current" {
-		t.Errorf("KubeletImageRef = %q, want the unversioned name", KubeletImageRef)
-	}
-	if strings.Contains(KubeletImageRef, "1.") {
-		t.Errorf("KubeletImageRef = %q carries a version", KubeletImageRef)
-	}
 }
 
 func TestBothRolesInstallWhatTheKubeletNeeds(t *testing.T) {
@@ -1107,26 +1001,19 @@ func TestJoiningControlPlaneReceivesThePKIAndJoins(t *testing.T) {
 }
 
 func TestJoinCommandSkipsKubeletStart(t *testing.T) {
-	// kubeadm join would otherwise write a kubelet environment file and start
-	// kubelet.service on the host, and this system runs the kubelet in a
-	// container under its own unit.
+	// kubeadm join would otherwise write a kubelet environment file and start the
+	// kubelet; this system starts its own kubelet before the join, so the phase
+	// that would start a second one is skipped.
+	//
 	// One command, run from the bootstrap stage: this node's kubelet has to be
 	// running before the join, or its etcd member is added as a learner that can
 	// never catch up and the promotion retries forever.
-	cmd := strings.Join(JoinControlPlaneCommand("img"), " ")
+	cmd := strings.Join(JoinControlPlaneCommand(), " ")
 	if !strings.Contains(cmd, "kubeadm join") || strings.Contains(cmd, "kubeadm init") {
 		t.Errorf("command = %q, want `kubeadm join`", cmd)
 	}
-	// kubelet-start is skipped because kubeadm would start kubelet.service, which
-	// this system does not have: the kubelet is a container under its own unit,
-	// already running by the time this command is reached.
 	if !strings.Contains(cmd, "--skip-phases=kubelet-start") {
 		t.Errorf("command = %q, want it to skip kubelet-start", cmd)
-	}
-	for _, mount := range []string{"/lib/modules", "/boot", "/run/containerd"} {
-		if !strings.Contains(cmd, mount) {
-			t.Errorf("command = %q, does not mount %s", cmd, mount)
-		}
 	}
 }
 

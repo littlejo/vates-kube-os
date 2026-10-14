@@ -88,3 +88,34 @@ func TestConsoleKeepsItsDefaultWithoutADropIn(t *testing.T) {
 		t.Errorf("consoleEnv on a missing drop-in = %v, want nil", got)
 	}
 }
+
+// TestKubeletArgsAreFlagsOnly pins that kubeletArgs returns the flags alone: PID
+// 1 supplies the program as argv[0] (it is /usr/local/bin/kubelet, the launcher
+// symlink), so a program path repeated here would reach the kubelet as a stray
+// positional argument.
+func TestKubeletArgsAreFlagsOnly(t *testing.T) {
+	args := kubeletArgsFromEnv(map[string]string{})
+
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"the kubelet configuration", "--config=/etc/kubelet/kubelet.conf"},
+		{"the root dir", "--root-dir=/var/lib/kubelet"},
+		{"the kubeconfig", "--kubeconfig=/etc/kubernetes/kubelet.conf"},
+		{"the client CA", "--client-ca-file=/etc/kubernetes/pki/ca.crt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !slices.Contains(args, tt.want) {
+				t.Errorf("kubeletArgsFromEnv() is missing %q: %v", tt.want, args)
+			}
+		})
+	}
+
+	for _, a := range args {
+		if a == "/usr/local/bin/kubelet" {
+			t.Errorf("the program path must not be in the flags (startChild supplies argv[0]): %v", args)
+		}
+	}
+}

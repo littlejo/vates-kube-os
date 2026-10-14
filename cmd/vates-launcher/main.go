@@ -1,8 +1,8 @@
 // Command vates-launcher fetches, verifies, caches and executes one Kubernetes
 // binary.
 //
-// It is what the kubelet image contains instead of the kubelet, under the names
-// kubelet, kubeadm, kubectl and mounter. It is a separate binary so that image
+// It is what the node runs instead of a packaged kubelet, under the names
+// kubelet, kubeadm, kubectl and mounter. It is a separate binary so the host
 // carries only the launcher -- with its HTTP client and nothing else -- instead
 // of the whole multi-call binary. See docs/BINARIES.md.
 package main

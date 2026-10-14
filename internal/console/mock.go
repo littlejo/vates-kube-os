@@ -119,6 +119,14 @@ func mockSnapshot() dashboard.Snapshot {
 	return s
 }
 
+// MockSnapshot and MockHost expose the fabricated node to the preview renderer
+// (cmd/ggpreview), so that the picture it writes is the one --gui --mock shows
+// and not a second fabrication free to drift from it.
+func MockSnapshot() dashboard.Snapshot { return mockSnapshot() }
+
+// MockHost fills a host reading with the fabricated machine's numbers.
+func MockHost(info hostinfo.Info) hostinfo.Info { return mockHost(info) }
+
 // mockHost returns readings for the fabricated machine: three gigabytes and two
 // cores, so that the notes beside the percentages have something to say.
 func mockHost(info hostinfo.Info) hostinfo.Info {
