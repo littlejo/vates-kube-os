@@ -68,3 +68,33 @@ func TestResolveNodeNameFallsBackToTheHostname(t *testing.T) {
 		t.Errorf("ResolveNodeName = %q, want the hostname %q", got, host)
 	}
 }
+
+func TestDetectPlatform(t *testing.T) {
+	// The detector is a pure function of the machine's identity strings, so it
+	// is tested against fixtures rather than a real hypervisor. Order matters:
+	// Xen is checked first, because a Xen guest can also present a QEMU/SeaBIOS
+	// identity, and /proc/xen is the kernel's own detection of Xen.
+	cases := []struct {
+		name       string
+		xenType    string
+		sysVendor  string
+		product    string
+		biosVendor string
+		xenProc    bool
+		want       Platform
+	}{
+		{"xen via /proc/xen", "", "", "", "", true, PlatformXen},
+		{"xen via hypervisor type", "xen", "", "", "", false, PlatformXen},
+		{"xen via dmi", "", "XenServer", "HVM domU", "SeaBIOS", false, PlatformXen},
+		{"kvm via hypervisor type", "kvm", "", "", "", false, PlatformKVM},
+		{"kvm via dmi qemu", "", "QEMU", "Standard PC (Q35 + ICH9, 2009)", "SeaBIOS", false, PlatformKVM},
+		{"kvm via dmi kvm", "", "KVM", "QEMU", "SeaBIOS", false, PlatformKVM},
+		{"bare metal", "", "GenuineIntel", "My Machine", "Award Software", false, PlatformBareMetal},
+		{"unknown", "", "", "", "", false, PlatformBareMetal},
+	}
+	for _, c := range cases {
+		if got := detectPlatform(c.xenType, c.sysVendor, c.product, c.biosVendor, c.xenProc); got != c.want {
+			t.Errorf("%s: detectPlatform = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

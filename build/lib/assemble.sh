@@ -70,11 +70,10 @@ done
 
 echo "=== [assemble] overlay, /etc, assets ==="
 cp -a "${CTX}/overlay/." "${SYSROOT}/"
-install -d "${SYSROOT}/etc/modules-load.d" "${SYSROOT}/etc/sysctl.d" \
+install -d "${SYSROOT}/etc/sysctl.d" \
 	"${SYSROOT}/usr/share/vates/cni/net.d" "${SYSROOT}/usr/share/vates/cni/bin" \
 	"${SYSROOT}/opt/cni/bin" "${SYSROOT}/etc/cni/net.d"
 [ -d "${CTX}/config/cni" ] && cp -a "${CTX}/config/cni/." "${SYSROOT}/usr/share/vates/cni/net.d/"
-[ -d "${CTX}/config/modules-load.d" ] && cp -a "${CTX}/config/modules-load.d/." "${SYSROOT}/etc/modules-load.d/"
 [ -d "${CTX}/config/sysctl.d" ] && cp -a "${CTX}/config/sysctl.d/." "${SYSROOT}/etc/sysctl.d/"
 install -d "${SYSROOT}/usr/share/vates/assets"
 [ -d "${CTX}/assets" ] && cp -a "${CTX}/assets/." "${SYSROOT}/usr/share/vates/assets/"
