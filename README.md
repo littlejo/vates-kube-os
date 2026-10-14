@@ -14,7 +14,7 @@ Kubernetes component is a container.
 The image is **built from source**, not from a distribution: **glibc, no
 systemd, no SELinux, no package manager**, every component compiled from its
 upstream source and pinned by sha256. `vates-sysinit` is PID 1; the screen is
-the cairo + DRM console, preceded by a boot screen of our own.
+the Go + DRM console, preceded by a boot screen of our own.
 
 > **What it is and how it works**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 > **Build the image**: [`docs/BUILD.md`](docs/BUILD.md)
@@ -39,7 +39,7 @@ the cairo + DRM console, preceded by a boot screen of our own.
 | **Kubernetes version** | chosen in `vates-node.yaml`, not in the image |
 | **Kubernetes binary on the host** | none |
 | **Bootloader** | systemd-boot (built without installing systemd) |
-| **Console** | cairo + DRM, plus a boot screen (`vates-splash`) |
+| **Console** | Go + DRM (fogleman/gg), plus a boot screen (`vates-splash`) |
 
 ---
 
@@ -149,7 +149,7 @@ internal/update/ab/    the A/B slot policy, shared by PID 1 and the API
 internal/update/imgsig/  verifying the image an update writes
 internal/configdrive/  reading the NoCloud config drive
 internal/dashboard/    collecting what the node knows about itself
-internal/display/      the console's two faces: tui/ (text), gui/ (cairo + DRM)
+internal/display/      the console's two faces: tui/ (text), gui/ (Go + DRM)
 internal/k8sbin/       where the Kubernetes binaries live and how they are named
 internal/hostinfo/     what the machine knows about itself, from /proc and /etc
 internal/kubeapi/      the Kubernetes client the console reads with
@@ -173,7 +173,7 @@ program: [`docs/BINARIES.md`](docs/BINARIES.md).
 - [x] `vates-init` configures a **worker** and a **control plane** (kubeadm + kube-vip)
 - [x] the `virsh` test cluster: 3 control planes + 3 workers, etcd with 3 voters,
       joins over the API, kube-vip moving the VIP on a power cut
-- [x] the cairo + DRM console and the `vates-splash` boot screen
+- [x] the Go + DRM console and the `vates-splash` boot screen
 - [x] the disk **layout** immutability needs: `boot / rootA / rootB / var`, `/var`
       last and grown at boot when the hypervisor grows the disk, with the second
       root reserved now

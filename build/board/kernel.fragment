@@ -3,7 +3,7 @@
 # there is no bootable kernel for it to load.
 CONFIG_EFI_STUB=y
 #
-# The console draws through DRM (cairo + libdrm) and the splash may draw through
+# The console draws through DRM (fogleman/gg + libdrm) and the splash may draw through
 # /dev/fb0. The node has NO module loader: no udev, no systemd, nothing runs
 # modprobe. A driver built as a module (`=m`, the defconfig default for most of
 # these) is therefore never loaded, and the /dev/dri/card0 the console looks for

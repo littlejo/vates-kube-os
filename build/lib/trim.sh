@@ -1,27 +1,17 @@
 #!/bin/bash
 # Remove binaries the node never calls, after the rootfs is assembled.
 #
-# cairo + pango pull in harfbuzz, fontconfig, glib and their command-line tools.
-# They are used to BUILD the console's libraries, not to run it: the console
-# draws through cairo/libdrm and never execs hb-*, fc-*, pango-* or gio. This
-# trims them, and every other real binary the node never calls -- the whole tool
-# sets of util-linux, iproute2, fdisk and pango (DEAD_BINS below). The libraries
-# themselves stay: only programs go.
+# The console draws in pure Go (internal/display/gui/render, fogleman/gg) and the
+# only long-running code is `vates` and the container runtime: this trims every
+# real binary the node never calls -- the whole tool sets of util-linux, iproute2,
+# fdisk and the like (DEAD_BINS below). The libraries themselves stay: only
+# programs go.
 set -euo pipefail
 
 : "${SYSROOT:=/sysroot}"
 TARGET_DIR="${SYSROOT}"
 BIN="${TARGET_DIR}/usr/bin"
 
-# Console build-time tools.
-rm -f "${BIN}"/hb-* "${BIN}"/fc-* "${BIN}"/pango-*
-# glib/gi tools.
-rm -f "${BIN}/gio" "${BIN}/gio-querymodules" "${BIN}/gsettings" \
-	"${BIN}/gapplication" "${BIN}/gdbus" "${BIN}/gresource" \
-	"${BIN}"/gi-inspect-typelib "${BIN}"/gi-decompile-typelib \
-	"${BIN}"/gi-compile-repository
-# pcre2 command-line tools.
-rm -f "${BIN}/pcre2test" "${BIN}/pcre2grep"
 # glibc's own tools and locale data -- the image runs UTC and has no locale.
 # ldconfig stays: the assembly runs it to build /etc/ld.so.cache.
 rm -f "${BIN}/gencat" "${BIN}/getconf" "${BIN}/getent" "${BIN}/iconv" \
@@ -34,10 +24,6 @@ rm -rf "${TARGET_DIR}/usr/libexec/getconf"
 # UTC. This is ~17 MB of i18n source data nothing on the node reads.
 rm -rf "${TARGET_DIR}/usr/share/i18n" "${TARGET_DIR}/usr/share/locale" \
 	"${TARGET_DIR}/usr/lib/locale"
-# glib's build-time tools; the console links the library, never execs these.
-rm -f "${BIN}/glib-compile-resources" "${BIN}/glib-compile-schemas" \
-	"${BIN}/gobject-query" "${BIN}/gtester" \
-	"${TARGET_DIR}/usr/libexec/gio-launch-desktop"
 # iproute2's extra tools; `ip` alone is what the node calls.
 for b in dcb devlink dpll netshaper rdma tipc vdpa; do
 	rm -f "${TARGET_DIR}/sbin/$b" "${TARGET_DIR}/usr/sbin/$b" "${TARGET_DIR}/usr/bin/$b"
@@ -56,7 +42,7 @@ rm -f "${BIN}/lscpu" "${BIN}/lsns" "${BIN}/lslocks" "${BIN}/lsirq" \
 # The real (non-symlink) binaries nothing on the node calls: `vates` and the
 # container runtime are the only code that runs, and every name below was checked
 # against the exec calls in cmd/ and internal/ and the embedded firstboot
-# templates. util-linux, iproute2, fdisk and pango ship
+# templates. util-linux, iproute2 and fdisk ship
 # their whole tool set, so they are removed here, from every directory.
 #
 # Kept, and the reason: blkid (config drive, growing /var), mount/umount (config
@@ -66,7 +52,7 @@ rm -f "${BIN}/lscpu" "${BIN}/lsns" "${BIN}/lslocks" "${BIN}/lsirq" \
 DEAD_BINS='
 	blkdiscard blkpr blkzone blockdev bridge bits chcpu choom col colcrt
 	colrm column ctrlaltdel dmesg enosys exch fadvise fdisk findfs findmnt
-	flock fribidi fsfreeze fstrim genl ifstat ldattach lnstat lsblk mkswap
+	flock fsfreeze fstrim genl ifstat ldattach lnstat lsblk mkswap
 	mountpoint nstat pipesz pivot_root readprofile rtacct rtcwake rtmon
 	scmp_sys_resolver sfdisk ss swaplabel swapoff swapon tc
 '
