@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vatesfr/vates-kube-os/internal/configdrive"
 	"github.com/vatesfr/vates-kube-os/internal/console/tty"
 	"github.com/vatesfr/vates-kube-os/internal/dashboard"
 	"github.com/vatesfr/vates-kube-os/internal/firstboot"
@@ -248,9 +250,15 @@ func isMountpoint(path string) bool {
 	return false
 }
 
-// bringUpNetwork brings the node's interface up and asks for a DHCP lease.
+// bringUpNetwork brings the node's interface up and gives it an address.
 //
-// There is no distribution and no network-online target here, so PID 1 owns it.
+// The address comes from the config drive when it carries a network-config, and
+// from the DHCP client otherwise. That order is deliberate: a control plane's
+// identity is tied to its address -- etcd records the peer URL it joined with,
+// and kubeadm writes it into the API server's own manifest -- so a lease that
+// can move is a control plane that can be lost on the next reboot. The provider
+// that created the machine knows its address; the DHCP server only knows a MAC.
+//
 // busybox's udhcpc does the lease for now -- it is the last busybox dependency
 // that matters, and replacing it with a Go client is a later step.
 func bringUpNetwork() {
@@ -266,6 +274,17 @@ func bringUpNetwork() {
 		return
 	}
 	_ = exec.Command("ip", "link", "set", iface, "up").Run()
+
+	if static := staticFromConfigDrive(); static != nil {
+		if err := applyStaticNetwork(static); err != nil {
+			kmsg("network: applying the config drive's addressing to %s: %v", static.Iface, err)
+		} else {
+			kmsg("network: %s configured from the config drive (%s)",
+				static.Iface, strings.Join(static.Addresses, ", "))
+			return
+		}
+	}
+
 	if _, err := exec.LookPath("udhcpc"); err != nil {
 		kmsg("network: %s is up but there is no udhcpc for a lease", iface)
 		return
@@ -277,6 +296,85 @@ func bringUpNetwork() {
 		return
 	}
 	kmsg("network: lease obtained on %s", iface)
+}
+
+// staticFromConfigDrive reads the addressing the config drive asks for, or nil
+// when there is no drive, no network-config, or one that asks for DHCP.
+//
+// The drive is read here rather than later because the address has to exist
+// before anything that needs the network, and the drive is a CD-ROM that is
+// already attached -- so a bounded retry is enough to cover the device node
+// appearing. A node built by hand has no drive at all, which is not an error:
+// the DHCP client below is the fallback.
+func staticFromConfigDrive() *configdrive.StaticNetwork {
+	deadline := time.Now().Add(configDriveWait)
+	for {
+		drive, err := configdrive.Find()
+		if err == nil {
+			static, err := drive.StaticNetwork()
+			if err != nil {
+				kmsg("network: reading the config drive's network-config: %v", err)
+				return nil
+			}
+			return static
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// configDriveWait bounds the wait for the config drive before the node falls
+// back to DHCP. Long enough for a CD-ROM to appear, short enough not to delay a
+// node that has no drive.
+const configDriveWait = 10 * time.Second
+
+// applyStaticNetwork gives the interface the addresses, the default route and
+// the resolvers the config drive asked for.
+func applyStaticNetwork(network *configdrive.StaticNetwork) error {
+	if _, err := net.InterfaceByName(network.Iface); err != nil {
+		return fmt.Errorf("interface %s: %w", network.Iface, err)
+	}
+	for _, addr := range network.Addresses {
+		if err := runIP("addr", "add", addr, "dev", network.Iface); err != nil {
+			return err
+		}
+	}
+	if network.Gateway != "" {
+		if err := runIP("route", "add", "default", "via", network.Gateway, "dev", network.Iface); err != nil {
+			return err
+		}
+	}
+	if len(network.Nameservers) > 0 {
+		if err := writeResolvers(network.Nameservers); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runIP runs one `ip` command, returning its output with the error so a failed
+// bring-up says what the kernel refused.
+func runIP(args ...string) error {
+	cmd := exec.Command("ip", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("ip %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// writeResolvers replaces /etc/resolv.conf, which the image symlinks onto /run
+// so a read-only root can be written through it.
+func writeResolvers(servers []string) error {
+	var b strings.Builder
+	for _, server := range servers {
+		fmt.Fprintf(&b, "nameserver %s\n", server)
+	}
+	if err := os.WriteFile("/etc/resolv.conf", []byte(b.String()), 0o644); err != nil {
+		return fmt.Errorf("writing /etc/resolv.conf: %w", err)
+	}
+	return nil
 }
 
 // firstEthernet returns the first non-loopback interface name.
