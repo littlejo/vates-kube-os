@@ -1117,12 +1117,14 @@ func TestJoinDocumentUsesOnlyKnownFields(t *testing.T) {
 	}
 }
 
-func TestKubeadmPatchesPointTheLivenessProbeAwayFromEtcd(t *testing.T) {
-	// A slow etcd must not restart the API server: /livez includes the etcd
+func TestKubeadmPatchesPointBothProbesAwayFromEtcd(t *testing.T) {
+	// A slow etcd must neither restart the API server (/livez includes the etcd
 	// check, and a control plane killed for a slow disk is a control plane lost
-	// while etcd is already struggling. The patch is what moves the liveness
-	// probe off etcd, and it has to reach BOTH documents -- a joining control
-	// plane's kubeadm reads its own patches.directory.
+	// while etcd is already struggling) nor flap its readiness (/readyz includes
+	// it too, so at kubeadm's one-second period every transient becomes a Node
+	// Unhealthy event). The patch moves BOTH probes off etcd, and it has to
+	// reach BOTH documents -- a joining control plane's kubeadm reads its own
+	// patches.directory.
 	tests := []struct {
 		name   string
 		render func() ([]byte, error)
@@ -1162,7 +1164,7 @@ func TestKubeadmPatchesPointTheLivenessProbeAwayFromEtcd(t *testing.T) {
 	}
 
 	// The patch file itself: kubeadm applies it to the kube-apiserver static
-	// pod, so it must name that component and move ONLY the liveness probe.
+	// pod, so it must name that component and move BOTH probes off etcd.
 	var pod struct {
 		Kind     string `yaml:"kind"`
 		Metadata struct {
@@ -1177,11 +1179,15 @@ func TestKubeadmPatchesPointTheLivenessProbeAwayFromEtcd(t *testing.T) {
 						Path string `yaml:"path"`
 					} `yaml:"httpGet"`
 				} `yaml:"livenessProbe"`
-				ReadinessProbe *struct{} `yaml:"readinessProbe"`
+				ReadinessProbe struct {
+					HTTPGet struct {
+						Path string `yaml:"path"`
+					} `yaml:"httpGet"`
+				} `yaml:"readinessProbe"`
 			} `yaml:"containers"`
 		} `yaml:"spec"`
 	}
-	if err := yaml.Unmarshal(KubeAPIServerLivenessPatch(), &pod); err != nil {
+	if err := yaml.Unmarshal(KubeAPIServerProbesPatch(), &pod); err != nil {
 		t.Fatalf("the kube-apiserver patch does not parse: %v", err)
 	}
 	if pod.Kind != "Pod" || pod.Metadata.Name != "kube-apiserver" || pod.Metadata.Namespace != "kube-system" {
@@ -1195,13 +1201,20 @@ func TestKubeadmPatchesPointTheLivenessProbeAwayFromEtcd(t *testing.T) {
 	if c.Name != "kube-apiserver" {
 		t.Errorf("patched container = %q, want kube-apiserver", c.Name)
 	}
-	if got := c.LivenessProbe.HTTPGet.Path; got != "/livez?exclude=etcd" {
-		t.Errorf("liveness path = %q, want /livez?exclude=etcd", got)
+	probes := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"liveness", c.LivenessProbe.HTTPGet.Path, "/livez?exclude=etcd"},
+		{"readiness", c.ReadinessProbe.HTTPGet.Path, "/readyz?exclude=etcd&exclude=etcd-readiness"},
 	}
-	// Readiness keeps the etcd check: an API server that cannot read etcd
-	// should leave its Service endpoints. Only the liveness probe changes.
-	if c.ReadinessProbe != nil {
-		t.Error("the patch touches readinessProbe; only the liveness probe must drop etcd")
+	for _, p := range probes {
+		t.Run(p.name+" probe path", func(t *testing.T) {
+			if p.got != p.want {
+				t.Errorf("%s probe path = %q, want %q", p.name, p.got, p.want)
+			}
+		})
 	}
 
 	// And the patch must actually be installed, at the path the documents name.
@@ -1210,12 +1223,12 @@ func TestKubeadmPatchesPointTheLivenessProbeAwayFromEtcd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MasterFiles() failed: %v", err)
 	}
-	f, ok := findFile(files, filepath.Join(PatchesDir, kubeAPIServerLivenessPatchName))
+	f, ok := findFile(files, filepath.Join(PatchesDir, kubeAPIServerPatchName))
 	if !ok {
-		t.Fatalf("MasterFiles() did not install the patch at %s/%s", PatchesDir, kubeAPIServerLivenessPatchName)
+		t.Fatalf("MasterFiles() did not install the patch at %s/%s", PatchesDir, kubeAPIServerPatchName)
 	}
-	if string(f.Content) != string(KubeAPIServerLivenessPatch()) {
-		t.Error("the installed patch differs from KubeAPIServerLivenessPatch()")
+	if string(f.Content) != string(KubeAPIServerProbesPatch()) {
+		t.Error("the installed patch differs from KubeAPIServerProbesPatch()")
 	}
 }
 
