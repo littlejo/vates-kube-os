@@ -13,9 +13,8 @@ import (
 
 // Console is what a machine shows on its console (tty1).
 //
-// It replaces the shell script that used to do this. Which of the faces appears
-// is decided by `dashboard.mode` in vates-node.yaml, which reaches this program
-// through a systemd drop-in written by vates-init:
+// Which of the faces appears is decided by `dashboard.mode` in vates-node.yaml,
+// which reaches this program through a systemd drop-in written by vates-init:
 //
 //	tui    the text dashboard: no dependency, works on any console, and the only
 //	       one that can work on a serial console
@@ -48,27 +47,20 @@ func Console(argv []string) error {
 	case "tui":
 		return textDashboard()
 	case "gui":
-		// The graphical console draws straight into the screen's own buffer.
-		// There is no compositor, no session and no seat: cairo writes where the
-		// display controller reads, and scrolling is a memory copy. Measured on
-		// a node, against the GTK window that ran under cage before it:
+		// The graphical console draws into an image of its own and blits it
+		// into the screen's buffer. There is no compositor, no session and no
+		// seat, and scrolling is a memory copy: 23 MB resident, 0.5 % of a
+		// core to scroll, measured on a node.
 		//
-		//   cage + GTK   83 MB, 51 to 67 % of a core to scroll
-		//   this         23 MB, 0.5 %
+		// An intention is not a fallback. The program is started, looked at
+		// after a moment, and replaced by the text dashboard if it is already
+		// gone -- no /dev/dri/card0, a card the kernel refuses, a mode that
+		// will not set. A machine that promised a picture and shows nothing is
+		// worse than one that shows text.
 		//
-		// Which is why none of what used to be here is here any more.
-		//
-		// The check is the same as it ever was, and for the same reason: an
-		// intention is not a fallback. The program is started, looked at after a
-		// moment, and replaced by the text dashboard if it is already gone -- no
-		// /dev/dri/card0, a card the kernel refuses, a mode that will not set.
-		// A machine that promised a picture and shows nothing is worse than one
-		// that shows text.
-		//
-		// The graphical face is a child process, not a call: this is the shape
-		// the shell had (`--gui &`, then a liveness check), and it is the only
-		// one that can tell "it drew" from "it exited" -- the renderer returns
-		// only when it stops.
+		// The graphical face is a child process, not a call: it is the only
+		// shape that can tell "it drew" from "it exited" -- the renderer
+		// returns only when it stops.
 		if _, err := os.Stat("/dev/dri/card0"); err == nil {
 			if done, ok := startGUI(); ok {
 				if err := <-done; err == nil {

@@ -37,7 +37,7 @@ func KubeadmConfig(cfg *vatescfg.Config, nodeName, nodeIP string) ([]byte, error
 		ServiceSubnet        string
 		DNSDomain            string
 		// PatchesDir is where kubeadm reads the patch that keeps etcd out of
-		// the API server's liveness probe. See KubeAPIServerLivenessPatch.
+		// the API server's probes. See KubeAPIServerProbesPatch.
 		PatchesDir string
 		// ImageRepository is empty unless a mirror is configured, and empty
 		// means "do not mention it": kubeadm's own defaults are then used, which

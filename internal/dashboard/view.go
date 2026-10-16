@@ -1,7 +1,7 @@
 // view.go holds what the console SHOWS, as opposed to what it collects.
 //
 // It is here, next to the collection, because there is more than one renderer:
-// the text console, the GTK window, and the drawing one. Each of them decides
+// the text console and the drawing one. Each of them decides
 // how big a thing is and where it goes -- that is rendering -- but none of them
 // should decide what a tile SAYS, what colour a warning gets, or how an event is
 // turned into a line. Two renderers with their own copy of that would drift, and
@@ -204,7 +204,7 @@ func Timestamp(e kubeapi.Event) string {
 	return e.When().Format("15:04:05")
 }
 
-// EventMarkup is one event as Pango markup: the time, the reason in a fixed
+// EventMarkup is one event as markup: the time, the reason in a fixed
 // column, and the message. The colour states the severity, and the message is
 // what carries the prose -- it is the only part a feed lets wrap.
 //
@@ -233,11 +233,11 @@ var eventReasonColour = map[string]string{
 // Span is a coloured run of text, escaped so that an event message containing an
 // ampersand or an angle bracket stays data rather than becoming markup.
 func Span(colour, s string) string {
-	return `<span foreground="` + colour + `">` + PangoEscape(s) + `</span>`
+	return `<span foreground="` + colour + `">` + MarkupEscape(s) + `</span>`
 }
 
-// PangoEscape makes arbitrary text safe to put inside Pango markup.
-func PangoEscape(s string) string {
+// MarkupEscape makes arbitrary text safe to put inside markup.
+func MarkupEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 

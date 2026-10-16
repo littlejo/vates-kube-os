@@ -37,30 +37,64 @@ const EtcdDataDir = "/var/lib/etcd"
 // the join.
 const PatchesDir = "/etc/kubernetes/patches"
 
-// kubeAPIServerLivenessPatchName is the patch file's name, in kubeadm's
-// convention `<target>+<patchtype>.<extension>`: the kube-apiserver static pod,
-// applied as a strategic merge.
-const kubeAPIServerLivenessPatchName = "kube-apiserver+strategic.yaml"
+// kubeAPIServerPatchName is the patch file's name, in kubeadm's convention
+// `<target>+<patchtype>.<extension>`: the kube-apiserver static pod, applied as
+// a strategic merge.
+const kubeAPIServerPatchName = "kube-apiserver+strategic.yaml"
 
-// KubeAPIServerLivenessPatch keeps etcd out of the API server's LIVENESS probe.
+// KubeAPIServerProbesPatch keeps etcd out of BOTH of the API server's probes.
 //
-// kubeadm's default liveness probe is /livez, and /livez includes the etcd
-// check. That couples the process's survival to etcd's latency: a slow etcd --
-// a shared NFS SR, an overloaded disk -- makes /livez answer 500, and if it
-// stays down past the probe's failureThreshold the kubelet RESTARTS the API
-// server. That is the one thing that cannot help: the API server is not what is
-// slow, and killing it removes a control plane from the cluster while etcd is
-// already struggling. Measured on a three-control-plane demo whose disks were
-// on NFS: the etcd leader logged "leader is overloaded likely from slow disk"
-// and all three API servers answered 500 to the probe within the same second.
+// kubeadm's defaults are /livez for liveness and /readyz for readiness, and both
+// include an etcd check. On a shared NFS SR an etcd round-trip costs ~20 ms
+// against ~0.7 ms on a local disk (measured), reads pass 100 ms, and both checks
+// answer 500. Measured on a three-control-plane demo: the etcd leader logged
+// "leader is overloaded likely from slow disk", all three API servers answered 500
+// to the readiness probe within the same second, and it produced ~77 Node
+// `Unhealthy` events on an otherwise idle cluster.
 //
-// /livez?exclude=etcd keeps the check on the API server's own health and drops
-// the etcd dependency. READINESS still includes etcd, which is right: an API
-// server that cannot read etcd should leave its Service endpoints. Only the
-// probe that RESTARTS the process stops consulting etcd.
-func KubeAPIServerLivenessPatch() []byte {
-	return []byte(`# Written by vates-init. See KubeAPIServerLivenessPatch for why the liveness
-# probe drops the etcd check that kubeadm's default /livez carries.
+// Those events are noise, and it is worth being precise about why, because the
+// obvious reading -- "the API server fell out of the `kubernetes` Service
+// endpoints" -- is WRONG. The `kubernetes` endpoints are not built from pod
+// readiness. They are owned by the API server's own endpoint reconciler
+// (`--endpoint-reconciler-type` defaults to `lease`): every API server refreshes a
+// TTL'd lease record in etcd, and whichever reconciler runs rebuilds the address
+// list from the live leases. Pod readiness is never consulted -- the Endpoints
+// carries `endpointslice.kubernetes.io/skip-mirror: "true"` and the API server
+// manages the EndpointSlice itself (observed `managedFields` manager:
+// kube-apiserver). A readiness flap marked the Pod NotReady and fired events; it
+// moved no traffic.
+//
+// What the checks did cost: that noise, and a real restart risk on the liveness
+// side -- past its `failureThreshold: 8` x `periodSeconds: 10` a slow etcd
+// restarts the API server, which cannot help an etcd that is merely slow.
+//
+// Removing them leaves nothing unsupervised:
+//
+//   - etcd has its OWN static-pod liveness probe (`/livez` on the metrics port,
+//     `periodSeconds: 10`, `failureThreshold: 8`): a dead or hung etcd is
+//     restarted by the kubelet, independently of the API server;
+//   - the LEASE is what evicts an API server that can no longer reach its etcd.
+//     kubeadm points each API server at its LOCAL etcd only
+//     (`--etcd-servers=https://127.0.0.1:2379`); once that etcd is gone the lease
+//     cannot be refreshed, it expires, and the other API servers drop the IP from
+//     the endpoints. The safety property survives -- it was never the probe's.
+//
+// Two things are easy to get wrong here, and both were measured on a live API
+// server:
+//
+//   - READINESS has TWO etcd checks, `etcd` and `etcd-readiness`. Excluding only
+//     `etcd` leaves `etcd-readiness` running, and the readiness still answers 500
+//     on a slow etcd -- it LOOKS patched and is not. Both must go;
+//   - `exclude` takes one name per parameter and is NOT comma-separated:
+//     `?exclude=etcd,etcd-readiness` matches nothing (the server warns "no
+//     matches for ...") and excludes nothing. The parameter is repeated instead.
+//
+// The liveness probe carries only `etcd`, so one exclusion is enough there.
+// Talos runs no probe at all on its API server; this is the same choice, kept
+// narrow to preserve what kubeadm's probes were actually for.
+func KubeAPIServerProbesPatch() []byte {
+	return []byte(`# Written by vates-init. See KubeAPIServerProbesPatch for why both probes
+# drop the etcd checks that kubeadm's default /livez and /readyz carry.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -72,6 +106,9 @@ spec:
     livenessProbe:
       httpGet:
         path: /livez?exclude=etcd
+    readinessProbe:
+      httpGet:
+        path: /readyz?exclude=etcd&exclude=etcd-readiness
 `)
 }
 
@@ -275,15 +312,15 @@ func MasterFiles(cfg *vatescfg.Config, drive *configdrive.Drive, paths Paths, no
 		})
 	}
 
-	// The API server's liveness probe must not depend on etcd, and kubeadm's
-	// default one does. The patch is written for BOTH join paths: a joining
-	// control plane's kubeadm join reads it from the join document's
+	// The API server's probes must not depend on etcd, and kubeadm's defaults
+	// both do. The patch is written for BOTH join paths: a joining control
+	// plane's kubeadm join reads it from the join document's
 	// patches.directory, exactly as the bootstrapping phases read it from the
 	// init document's.
 	files = append(files, File{
-		Path:    filepath.Join(PatchesDir, kubeAPIServerLivenessPatchName),
+		Path:    filepath.Join(PatchesDir, kubeAPIServerPatchName),
 		Mode:    0o644,
-		Content: KubeAPIServerLivenessPatch(),
+		Content: KubeAPIServerProbesPatch(),
 	})
 
 	return files, nil

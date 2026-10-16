@@ -3,7 +3,7 @@
 // face that draws or prints a snapshot.
 //
 // It is a separate binary so the long-running dashboard carries the renderers
-// (cairo, DRM, bubbletea) and nothing else -- not the API, not containerd.
+// (gg, DRM, bubbletea) and nothing else -- not the API, not containerd.
 // See docs/BINARIES.md.
 package main
 
