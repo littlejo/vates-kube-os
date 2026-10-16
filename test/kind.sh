@@ -140,12 +140,36 @@ web_node="$(kubectl get pod -l app=web -o jsonpath='{.items[0].spec.nodeName}')"
 client_node="$(kubectl get pod client -o jsonpath='{.spec.nodeName}')"
 [ "${web_node}" != "${client_node}" ] || die "web and client landed on the same node (${web_node}); the test would not cross nodes"
 
+# The datapath and DNS are programmed asynchronously once the pods come up, so a
+# single connect can race them and fail while everything is healthy a moment
+# later -- observed on CI: the first bring-up of a fresh cilium cluster failed
+# the ClusterIP check, the immediate rerun passed. Retry until the budget runs
+# out and only then fail, with the last error; the same shape as do_wait in
+# test/cluster.sh, which refuses to call a cluster up on nodes alone.
+connect_until() { # <budget-seconds> <client-pod> <cmd...>
+  local budget="$1" client="$2"; shift 2
+  local deadline=$(( $(date +%s) + budget )) out
+  while :; do
+    if out="$(kubectl exec "${client}" -- "$@" 2>&1)"; then
+      printf '%s\n' "${out}"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "${deadline}" ]; then
+      echo "  the connect never succeeded within ${budget}s; last error:" >&2
+      sed 's/^/    /' <<<"${out}" >&2
+      return 1
+    fi
+    sleep 3
+  done
+}
+
 say "DNS and the ClusterIP Service, ${client_node} -> ${web_node}"
-kubectl exec client -- /agnhost connect --timeout=5s web.default.svc.cluster.local:80
+connect_until 120 client /agnhost connect --timeout=5s web.default.svc.cluster.local:80 \
+  || die "the ClusterIP Service / DNS never answered across nodes"
 
 say "pod to pod, ${client_node} -> ${web_ip} on ${web_node}"
-got="$(kubectl exec client -- /agnhost connect --timeout=5s "${web_ip}:8080" && echo ok)"
-[ "${got}" = "ok" ] || die "pod-to-pod across nodes failed"
+connect_until 120 client /agnhost connect --timeout=5s "${web_ip}:8080" \
+  || die "pod-to-pod across nodes failed"
 
 if [ "${CNI}" = "cilium" ]; then
   # One operator, maxSurge 0: a rollout must replace it, not wait on a surge
